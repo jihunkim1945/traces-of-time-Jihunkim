@@ -1,0 +1,2669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traces of Time</title>
+<style>
+  :root{
+    --bg:#ffffff;
+    --ink:#171715;
+    --thread:#b11a2e;
+  }
+  *{ box-sizing:border-box; }
+  html,body{
+    margin:0; padding:0; width:100%;
+    background:var(--bg);
+    color:var(--ink);
+    font-family: 'Helvetica Neue', Helvetica, Arial, 'Noto Sans', sans-serif;
+  }
+  /* the hero→body boundary used to lean on CSS scroll-snap here, but the
+     hero→body "page turn" script further down now owns that transition
+     outright (rubber-band resistance via direct window.scrollTo calls) —
+     leaving scroll-snap active fought it, silently pulling scrollY back
+     toward its own snap point mid-drag. No CSS scroll-snap on this page. */
+
+  /* ---------- hero: the very first screen — big title over the rust
+     texture. `position:sticky` holds it pinned to the top of the
+     viewport while you scroll, so #page-wrap — right behind it in the
+     DOM — rises up from the bottom edge of the screen and visually
+     covers it, like a new page being laid on top. Once you've scrolled
+     a full viewport's worth, #page-wrap has fully covered the screen
+     and #hero should let go and disappear — no JS, no intercepted
+     scroll events, just CSS.
+
+     The catch: a sticky element's containing block is its nearest
+     positioned ANCESTOR, not its own box — left as a direct child of
+     <body>, #hero's containing block is the full ~20000px document, so
+     it would stay glued to the top of the screen for the ENTIRE page,
+     not just the first viewport (which, with the corrosion mask later
+     punching holes through #page-wrap, meant the rust texture bled
+     through those holes instead of the photo sphere behind it). The fix
+     is the standard "pin zone" trick: .hero-pin-zone below is exactly
+     2 viewports tall, giving #hero one extra viewport of room to stay
+     stuck in before it has to let go — but a matching -100vh bottom
+     margin collapses that extra height back out of the normal document
+     flow, so #page-wrap still starts exactly one viewport down, same
+     as every heroH-based offset elsewhere in this file expects. */
+  .hero-pin-zone{
+    position:relative;
+    height:200vh;
+    margin-bottom:-100vh;
+  }
+  #hero{
+    position:sticky;
+    top:0;
+    width:100%; height:100vh;
+    overflow:hidden;
+    background:#050505; /* shows for an instant before the first fractal frame paints */
+    z-index:1; /* level with #page-wrap below — later in the DOM, #page-wrap wins ties and paints over it */
+  }
+  #hero-canvas{
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    display:block;
+  }
+  /* title layout taken from the user's own book-cover design: not one
+     big centered line, but the two phrases "Traces of Time" / "Decay as
+     Rebirth" interleaved into three columns — each column stacking one
+     word from each phrase — spread across the full width and mirrored
+     (left column hugs the left edge, right column the right edge, center
+     column centered) so the whole thing reads as a balanced horizontal
+     band rather than a single block */
+  .hero-title{
+    position:absolute;
+    top:50%; left:50%;
+    transform:translate(-50%,-50%);
+    width:min(94vw, 1500px);
+    margin:0;
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    font-size:clamp(13px, 1.7vw, 23px);
+    font-weight:600;
+    letter-spacing:0.09em;
+    line-height:1.6;
+    text-transform:uppercase;
+    color:#fff;
+    pointer-events:none;
+    user-select:none;
+  }
+  .hero-title-col{
+    display:flex;
+    flex-direction:column;
+  }
+  .hero-title-col.left{ align-items:flex-start; text-align:left; }
+  .hero-title-col.center{ align-items:center; text-align:center; }
+  .hero-title-col.right{ align-items:flex-end; text-align:right; }
+  .hero-hint{
+    position:absolute;
+    bottom:36px; left:50%;
+    transform:translateX(-50%);
+    color:#fff;
+    font-size:11px;
+    letter-spacing:3px;
+    text-transform:uppercase;
+    opacity:0.6;
+    text-shadow:0 1px 6px rgba(0,0,0,0.5);
+    pointer-events:none;
+    animation: heroHintPulse 2.4s ease-in-out infinite;
+  }
+  @keyframes heroHintPulse{
+    0%,100%{ opacity:0.25; transform:translateX(-50%) translateY(0); }
+    50%{ opacity:0.85; transform:translateX(-50%) translateY(6px); }
+  }
+
+  /* ---------- layer 0: hidden image network, fixed behind everything ---------- */
+  #stage{
+    position:fixed; inset:0;
+    width:100vw; height:100vh;
+    overflow:hidden;
+    background:#f5f4f0;
+    z-index:0;
+  }
+  #three-canvas{
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    display:block;
+  }
+
+  /* dust puffing off the active corrosion edge as you scroll */
+  #dust-canvas{
+    position:fixed; inset:0;
+    width:100vw; height:100vh;
+    pointer-events:none;
+    z-index:7;
+  }
+
+  /* ---------- layer 1: white page surface + text, corrode open together ----------
+     the mask lives on #page-wrap itself (the shared ancestor of the white
+     surface AND the text), so one hole pattern cuts through both at once —
+     paper and ink erode as a single surface, always perfectly aligned. */
+  #page-wrap{
+    position:relative; z-index:1;
+    mask-repeat:repeat; -webkit-mask-repeat:repeat;
+    /* page-wrap itself has no visible paint outside the text column, but
+       being a normal block box it would otherwise still catch clicks
+       across the WHOLE page (full width, full document height) and stop
+       them reaching the 3D scene behind it — pointer-events:none here,
+       with .content opting back in below, lets drag-to-look-around work
+       anywhere except directly on the text (where selection still should
+       win) */
+    pointer-events:none;
+  }
+  #corrosion-bg{
+    position:absolute; inset:0;
+    background-color:var(--bg);
+    pointer-events:none;
+    z-index:1;
+  }
+  /* decorative cursor-trail glow — a rust-red smudge drawn directly onto
+     its own canvas, fixed to the viewport so it tracks the cursor's
+     actual on-screen position regardless of scroll. mix-blend-mode:
+     multiply so it reads as a stain soaking into the paper rather than a
+     flat color laid on top.
+     IMPORTANT: this is a sibling of #page-wrap, NOT a child of it, and
+     must stay that way — #page-wrap has its own mask-image (the scroll
+     corrosion pattern), and masking an element masks its whole rendered
+     subtree as one unit. Nesting this canvas inside #page-wrap made the
+     glow invisible wherever that unrelated hole pattern happened to be
+     transparent at that pixel, which is most of the page — not a
+     one-off edge case, the defining bug of putting it there at all.
+     z-index:2 — above the whole #page-wrap block (1), including its
+     text, since there's no way to sit "inside" that block without being
+     clipped by its mask; below #dust-canvas (7), so falling debris still
+     reads as in front of a cursor stain. */
+  #trail-glow-canvas{
+    position:fixed; inset:0;
+    width:100vw; height:100vh;
+    z-index:2;
+    pointer-events:none;
+    mix-blend-mode:multiply;
+  }
+
+  /* ---------- layer 2: the text itself, always sharp ---------- */
+  .content{
+    position:relative;
+    z-index:2;
+    max-width:640px;
+    margin:0 auto;
+    padding:34vh 24px 70vh;
+    pointer-events:auto; /* opts back in so the text stays selectable */
+  }
+  .booklet-label{
+    font-size:13px; letter-spacing:3px; text-transform:uppercase;
+    opacity:0.45;
+    margin: 6em 0 0.6em;
+  }
+  .booklet-label:first-child{ margin-top:0; }
+  .chapter-title{
+    font-size:25px; font-weight:600; letter-spacing:-0.01em;
+    line-height:1.3;
+    margin: 0.2em 0 1em;
+  }
+  p.diss-p{
+    font-size:17px; line-height:1.8;
+    margin: 0 0 1.5em;
+    font-weight:400;
+  }
+  p.quote{
+    font-size:25px; font-weight:500; line-height:1.45;
+    text-align:center; max-width:460px;
+    margin: 1.6em auto 2.4em;
+  }
+  .end-space{ height:40vh; }
+
+  #bgm-toggle{
+    position:fixed;
+    right:22px; bottom:22px;
+    z-index:20;
+    width:38px; height:38px;
+    border-radius:50%;
+    border:1px solid rgba(167,58,30,0.35);
+    background:rgba(10,8,7,0.55);
+    color:rgba(230,210,195,0.85);
+    font-size:15px;
+    line-height:1;
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+    backdrop-filter:blur(3px);
+    transition:opacity 0.3s ease, border-color 0.3s ease;
+    opacity:0.55;
+  }
+  #bgm-toggle:hover{ opacity:1; border-color:rgba(167,58,30,0.7); }
+</style>
+</head>
+<body>
+
+<div class="hero-pin-zone">
+<section id="hero">
+  <canvas id="hero-canvas"></canvas>
+  <h1 class="hero-title">
+    <div class="hero-title-col left"><span>Traces</span><span>Decay</span></div>
+    <div class="hero-title-col center"><span>Of</span><span>As</span></div>
+    <div class="hero-title-col right"><span>Time</span><span>Rebirth</span></div>
+  </h1>
+  <div class="hero-hint">Scroll</div>
+</section>
+</div>
+
+<div id="stage">
+  <canvas id="three-canvas"></canvas>
+</div>
+<canvas id="dust-canvas"></canvas>
+<canvas id="trail-glow-canvas"></canvas>
+
+<audio id="bgm" loop preload="auto" src="audio/bell-inside.wav"></audio>
+<button id="bgm-toggle" aria-label="toggle background music" title="background music">♪</button>
+
+<div id="page-wrap">
+  <div id="corrosion-bg"></div>
+  <div class="content" id="content"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.144.0/build/three.min.js"></script>
+<script>
+const IMAGES = ["assets/photo-001.jpg", "assets/photo-002.jpg", "assets/photo-003.jpg", "assets/photo-004.jpg", "assets/photo-005.jpg", "assets/photo-006.jpg", "assets/photo-007.jpg", "assets/photo-008.jpg", "assets/photo-009.jpg", "assets/photo-010.jpg", "assets/photo-011.jpg", "assets/photo-012.jpg", "assets/photo-013.jpg", "assets/photo-014.jpg", "assets/photo-015.jpg", "assets/photo-016.jpg", "assets/photo-017.jpg", "assets/photo-018.jpg", "assets/photo-019.jpg", "assets/photo-020.jpg", "assets/photo-021.jpg", "assets/photo-022.jpg", "assets/photo-023.jpg", "assets/photo-024.jpg", "assets/photo-025.jpg", "assets/photo-026.jpg", "assets/photo-027.jpg", "assets/photo-028.jpg", "assets/photo-029.jpg", "assets/photo-030.jpg", "assets/photo-031.jpg", "assets/photo-032.jpg", "assets/photo-033.jpg", "assets/photo-034.jpg", "assets/photo-035.jpg", "assets/photo-036.jpg", "assets/photo-037.jpg", "assets/photo-038.jpg", "assets/photo-039.jpg", "assets/photo-040.jpg", "assets/photo-041.jpg", "assets/photo-042.jpg", "assets/photo-043.jpg", "assets/photo-044.jpg", "assets/photo-045.jpg", "assets/photo-046.jpg", "assets/photo-047.jpg", "assets/photo-048.jpg", "assets/photo-049.jpg", "assets/photo-050.jpg", "assets/photo-051.jpg", "assets/photo-052.jpg", "assets/photo-053.jpg", "assets/photo-054.jpg", "assets/photo-055.jpg", "assets/photo-056.jpg", "assets/photo-057.jpg", "assets/photo-058.jpg", "assets/photo-059.jpg", "assets/photo-060.jpg", "assets/photo-061.jpg", "assets/photo-062.jpg", "assets/photo-063.jpg", "assets/photo-064.jpg", "assets/photo-065.jpg", "assets/photo-066.jpg", "assets/photo-067.jpg", "assets/photo-068.jpg", "assets/photo-069.jpg", "assets/photo-070.jpg", "assets/photo-071.jpg", "assets/photo-072.jpg", "assets/photo-073.jpg", "assets/photo-074.jpg", "assets/photo-075.jpg", "assets/photo-076.jpg", "assets/photo-077.jpg", "assets/photo-078.jpg", "assets/photo-079.jpg", "assets/photo-080.jpg", "assets/photo-081.jpg", "assets/photo-082.jpg", "assets/photo-083.jpg", "assets/photo-084.jpg", "assets/photo-085.jpg", "assets/photo-086.jpg", "assets/photo-087.jpg", "assets/photo-088.jpg", "assets/photo-089.jpg", "assets/photo-090.jpg", "assets/photo-091.jpg", "assets/photo-092.jpg", "assets/photo-093.jpg", "assets/photo-094.jpg", "assets/photo-095.jpg", "assets/photo-096.jpg", "assets/photo-097.jpg", "assets/photo-098.jpg", "assets/photo-099.jpg", "assets/photo-100.jpg", "assets/photo-101.jpg", "assets/photo-102.jpg", "assets/photo-103.jpg", "assets/photo-104.jpg", "assets/photo-105.jpg", "assets/photo-106.jpg", "assets/photo-107.jpg", "assets/photo-108.jpg", "assets/photo-109.jpg", "assets/photo-110.jpg", "assets/photo-111.jpg", "assets/photo-112.jpg", "assets/photo-113.jpg", "assets/photo-114.jpg", "assets/photo-115.jpg", "assets/photo-116.jpg", "assets/photo-117.jpg", "assets/photo-118.jpg", "assets/photo-119.jpg", "assets/photo-120.jpg", "assets/photo-121.jpg", "assets/photo-122.jpg", "assets/photo-123.jpg", "assets/photo-124.jpg", "assets/photo-125.jpg", "assets/photo-126.jpg", "assets/photo-127.jpg", "assets/photo-128.jpg", "assets/photo-129.jpg", "assets/photo-130.jpg", "assets/photo-131.jpg", "assets/photo-132.jpg", "assets/photo-133.jpg", "assets/photo-134.jpg", "assets/photo-135.jpg", "assets/photo-136.jpg", "assets/photo-137.jpg", "assets/photo-138.jpg", "assets/photo-139.jpg", "assets/photo-140.jpg", "assets/photo-141.jpg", "assets/photo-142.jpg"];
+const HERO_TEXTURE = "textures/tex-02-hero-rust.png";
+const OVERLAY_TEXTURES = ["textures/overlay-01.jpg", "textures/overlay-02.jpg", "textures/overlay-03.jpg", "textures/overlay-04.webp", "textures/overlay-05.webp", "textures/overlay-06.webp", "textures/overlay-07.webp", "textures/overlay-08.webp", "textures/overlay-09.webp", "textures/overlay-10.webp", "textures/overlay-11.webp", "textures/overlay-12.webp"];
+
+// ---- raw text content ---------------------------------------------------
+const BLOCKS = [
+  { type:'eyebrow', text:'Introduction' },
+  { type:'p', text:`Everything that exists in time changes. Surfaces fade, materials weaken, colors shift, edges soften, structures crack, and new forms begin to appear where old ones break down. These changes are often understood as damage or decline, but they can also be read as evidence of transformation.` },
+  { type:'p', text:`This publication explores aging, decay, and rebirth as connected stages of material change. Aging begins with subtle traces, decay interrupts the original form, and rebirth emerges when those changes create new patterns, surfaces, and relationships. Rather than seeing decay as a final state, this project looks at it as part of an ongoing process in which time continues to shape what humans have made.` },
+  { type:'p', text:`The three booklets move through this progression from trace, to breakdown, to new form, asking how time can act not only as a force of deterioration, but also as a second maker.` },
+
+  { type:'booklet', text:'Booklet 01 — Aging' },
+  { type:'h2', text:'Chapter 01 — The First Trace' },
+  { type:'p', text:`Everything begins to age the moment it enters the world. At first, the changes are almost impossible to notice. A color becomes slightly duller, a surface becomes softer where it has been touched, paper slowly loses its brightness, and a thin line appears on skin where there was none before. None of these changes immediately destroy the original form. Instead, they accumulate quietly. This is why aging often feels invisible until we compare what something is now with what it used to be.` },
+  { type:'p', text:`Objects are usually designed and presented to us in their newest state. They are photographed when they are clean, smooth, polished, uniform, and complete. We tend to think of this condition as the correct one, as if the object has finally arrived at its finished form. But this state is only temporary. From the moment an object begins to be used or exposed to its surroundings, it begins to change. Light affects color. Moisture alters surfaces. Heat expands material. Cold contracts it. Hands polish some areas and stain others. Dust settles. Air reacts. Friction removes layers one contact at a time. Aging begins long before we recognize it.` },
+  { type:'p', text:`Because these transformations happen slowly, we usually notice them only when they become visible enough to interrupt our expectations. A faded corner may suddenly seem obvious because the rest of the page is still dark. A wrinkle becomes visible because nearby skin remains smooth. A scratch catches light differently from the surface surrounding it. These marks are small, but they are significant because they reveal that the surface is no longer isolated from time.` },
+  { type:'p', text:`Aging is therefore not one event. It is an accumulation of many minor interactions. A surface becomes a record of contact with the world. It stores pressure, movement, weather, use, neglect, care, accident, and repetition. Some marks appear because something was touched every day. Others appear because something was left untouched for years. Some surfaces become polished through use, while others become brittle through exposure. In every case, time becomes visible through change.` },
+  { type:'p', text:`This idea is important because aging is often discussed only in relation to loss. Something was brighter before. Something was smoother before. Something was stronger before. This language compares the present condition with an earlier state and treats difference as decline. But the mark itself can also be understood as information. It tells us that the material has existed. It tells us that something happened to it. It provides evidence of duration.` },
+  { type:'p', text:`A brand-new object contains almost no visible history. Its surface tells us mainly how it was manufactured. An aged object carries another layer of information. The design is still present, but the environment has begun to write over it. The original surface and the traces of time exist together.` },
+  { type:'p', text:`This is why two identical objects can become completely different after years of use. They may begin with the same shape, color, and material, but one may sit in direct sunlight while another remains in shadow. One may be handled every day, while another is left untouched. One may be exposed to rain, salt, heat, or dust. The manufactured form may be identical, but time separates them.` },
+  { type:'p', text:`The first trace is important because it marks the moment when perfection becomes temporary. A small stain, wrinkle, scratch, or shift in color may seem insignificant, yet it begins a larger process. The material is no longer only what it was designed to be. It is becoming something shaped by time as well.` },
+  { type:'quote', text:'Aging is time accumulating on a surface. Before a form breaks, it leaves a trace.' },
+
+  { type:'h2', text:'Chapter 02 — Patina' },
+  { type:'p', text:`As traces accumulate, a surface begins to develop its own character. Patina is often used to describe the visible changes that appear through age, use, oxidation, exposure, and repeated contact. It may appear as darkened metal, polished wood, softened leather, faded pigment, worn paint, tarnished bronze, or a surface that has simply lost the uniformity it once had. What connects these examples is that time becomes visible without completely destroying the object.` },
+  { type:'p', text:`Patina complicates the idea that an object is most beautiful when it is new. A new object often represents control. Its color is consistent. Its surface is smooth. Its edges are precise. Its finish reflects the intention of the designer or manufacturer. Patina introduces another force into this system. It brings unpredictability.` },
+  { type:'p', text:`A metal surface exposed to moisture may oxidize more heavily along one edge than another. Wood touched repeatedly may become smoother in one place and remain rough elsewhere. Paper may yellow unevenly depending on how it was stored. Fabric may fade according to how light reaches it. These differences mean that aging gradually removes uniformity.` },
+  { type:'p', text:`This process can make an object more specific. Two objects may leave a factory looking exactly the same, but after years of different environments and different uses, they become visually distinct. One carries one history. The other carries another. Time turns repetition into individuality.` },
+  { type:'p', text:`Patina can also change how we understand value. In many contexts, signs of wear are treated as defects that should be removed. A scratch lowers resale value. A stain is cleaned. A faded surface is repainted. A tarnished metal is polished until the original shine returns. These actions attempt to reverse visible age and restore the object to an imagined earlier state.` },
+  { type:'p', text:`But patina can also increase emotional or aesthetic value. A worn handle shows where a hand repeatedly touched it. A faded book cover reveals years of exposure. A table marked with scratches carries traces of use. An old wall contains layers of paint that reveal previous versions of the space. Instead of hiding time, these surfaces display it.` },
+  { type:'p', text:`This creates a tension between preservation and change. We often preserve objects because we value them, but preserving them can also mean removing the very traces that reveal their history. If every scratch is erased, every faded surface repainted, and every irregularity corrected, the object may return closer to its original appearance while losing evidence of what it has experienced.` },
+  { type:'p', text:`Patina sits between these two conditions. It is not complete destruction, and it is not complete preservation. It is a visible negotiation between the original material and the forces acting upon it.` },
+  { type:'p', text:`This is why patina can feel alive. It changes slowly. It responds to environment. It develops differently depending on location, use, climate, and material. It cannot be fully predicted. Even when designers intentionally choose materials that age in certain ways, the final surface remains partially outside their control.` },
+  { type:'p', text:`This lack of control is important to my project. Design usually begins with intention. A designer chooses form, scale, material, color, texture, and structure. But after the object enters the world, other forces continue the process. Time becomes another participant.` },
+  { type:'p', text:`The original design does not disappear immediately. Instead, it becomes layered with evidence of what happened afterward. The surface becomes both designed and accidental, controlled and uncontrolled, original and altered.` },
+  { type:'p', text:`Patina is therefore not simply age. It is accumulated time made visible. It records interaction between material and world.` },
+  { type:'quote', text:'Age gives a surface an identity that could not exist when it was new.' },
+
+  { type:'h2', text:'Chapter 03 — Scars of Time' },
+  { type:'p', text:`Aging is often measured against an imagined original state. A scratch is understood because there was once a smooth surface. A wrinkle is visible because the skin once folded differently. A faded color is recognized because it was once more saturated. A chipped edge is defined by the form that used to exist in its place. This comparison makes almost every visible sign of aging appear as a loss.` },
+  { type:'p', text:`But imperfection can also be read as evidence.` },
+  { type:'p', text:`A scar does not simply describe damage. It describes an event and what remained afterward. In the same way, a worn surface can reveal how an object has existed in the world. A scratch records contact. A wrinkle records repeated movement. A stain records exposure. A faded page records light. A softened edge records touch.` },
+  { type:'p', text:`These marks transform a surface into a kind of archive.` },
+  { type:'p', text:`The idea of an archive is useful because an archive does not preserve only perfection. It preserves evidence. It allows different moments to remain visible at the same time. An aged surface works in a similar way. The original form remains partially present, but later events are layered over it.` },
+  { type:'p', text:`This makes aging visually complex. A new surface usually presents one dominant state. An old surface may contain many. Paint may reveal older paint beneath it. Metal may show areas of original finish beside oxidation. Paper may contain stains, folds, fading, and tears created at different times. A wall may carry repairs, cracks, patches, dirt, and new paint all at once.` },
+  { type:'p', text:`Each mark belongs to a different moment, but the surface holds them together.` },
+  { type:'p', text:`This layering makes it possible to think of imperfection not simply as failure, but as duration. The object has not remained untouched because it has continued to exist.` },
+  { type:'p', text:`There is also a difference between damage and memory. Not every damaged surface is meaningful, and not every trace needs to be romanticized. Some decay is dangerous. Some structural failure must be repaired. Some materials become unusable. But visually and conceptually, signs of age can still reveal important information about time, use, environment, and change.` },
+  { type:'p', text:`This is especially clear when comparing different surfaces. Human skin develops wrinkles through repeated movement, exposure, and the biological process of aging. Wood dries, cracks, and darkens. Metal oxidizes. Paper yellows and becomes brittle. Paint fades and separates from its base. These are completely different material processes, yet they share one visible quality: time becomes readable through surface change.` },
+  { type:'p', text:`This does not mean that human aging should be described as decay. The comparison is not about equating a person with a deteriorating object. Instead, it is about recognizing a broader visual idea. Different surfaces record time differently.` },
+  { type:'p', text:`A wrinkle can be understood as a trace of movement. A worn floor records footsteps. A faded poster records exposure. A polished railing records touch. In each case, repeated interaction slowly changes the material.` },
+  { type:'p', text:`This is why imperfection can create identity. A perfectly new object may represent the ideal form imagined by its designer. An aged object represents that form plus everything that has happened since.` },
+  { type:'p', text:`The difference between these states is history.` },
+  { type:'p', text:`Eventually, however, the marks of aging can become stronger than the original surface itself. A small crack expands. A stain spreads. A layer begins to separate. Oxidation penetrates deeper into metal. Paper loses strength. Wood begins to split.` },
+  { type:'p', text:`At this point, the trace is no longer simply sitting on the surface.` },
+  { type:'p', text:`It begins to change the structure.` },
+  { type:'p', text:`This is the threshold between aging and decay.` },
+  { type:'quote', text:'Aging leaves evidence. Decay begins when that evidence becomes transformation. When does a trace become a breakdown?' },
+
+  { type:'booklet', text:'Booklet 02 — Decay' },
+  { type:'h2', text:'Chapter 01 — Breakdown' },
+  { type:'p', text:`Decay begins when change can no longer remain contained on the surface. A faded color may still preserve the structure underneath. A scratch may alter appearance without changing function. A stain may remain superficial. But as aging continues, the material begins to lose control over its original form. A crack widens. Paint separates from the wall. Metal oxidizes deeper into the surface. Paper weakens. Wood splits along its grain. The form is still recognizable, but it is no longer stable in the same way.` },
+  { type:'p', text:`Decay is often understood as failure because it moves a material away from the condition imagined by its maker. A building is expected to remain structurally sound. A protective coating is expected to prevent corrosion. A printed page is expected to preserve information. When these systems begin to weaken, the process is usually treated as something that should be stopped, repaired, or reversed. From a practical point of view, this makes sense. Materials can become unsafe, objects can stop functioning, and structures can collapse.` },
+  { type:'p', text:`But decay can also be understood as a process rather than only a problem.` },
+  { type:'p', text:`The idea of a finished object suggests that design has an endpoint. A material is shaped, printed, assembled, or constructed, and then considered complete. Yet the moment it enters the world, that completeness begins to change. Weather continues to act on the surface. Moisture enters. Air reacts. Heat expands. Cold contracts. Friction removes small amounts of material. Gravity pulls. Biological growth finds openings. The object continues to exist within forces that are constantly changing it.` },
+  { type:'p', text:`In this sense, the finished state is temporary.` },
+  { type:'p', text:`Decay makes that temporariness visible.` },
+  { type:'p', text:`A clean surface begins to lose its uniformity. A straight edge becomes irregular. A layer detaches and exposes what was underneath. A crack interrupts continuity. A hole appears where there was once solid material. These changes may seem destructive, but they also create new relationships between shape, texture, color, and space.` },
+  { type:'p', text:`This is where decay becomes visually interesting.` },
+  { type:'p', text:`A smooth surface contains very little variation. A deteriorating surface often contains many. Areas of light and dark appear. Texture becomes deeper. Edges become unpredictable. Layers overlap. Missing areas create new negative spaces.` },
+  { type:'p', text:`The material becomes less controlled but more visually complex.` },
+  { type:'p', text:`Decay therefore creates a contradiction. It removes material while producing form. A crack is created through separation. A hole is defined by absence. Peeling creates layers by breaking adhesion. Erosion changes the outline by removing material from it. Rust introduces color and texture through chemical transformation. Something is always being lost, but something else becomes visible because of that loss.` },
+  { type:'p', text:`This does not mean decay should be romanticized as purely beautiful. Decay can be dangerous, destructive, and irreversible. But visually, it demonstrates that the disappearance of one condition can create another.` },
+  { type:'p', text:`This is important to the idea of transformation.` },
+  { type:'p', text:`The original form does not simply vanish all at once. It passes through intermediate states. These states are unstable, but they are also visually rich. An object may be partly intact and partly deteriorated. A wall may show old paint, new paint, exposed plaster, cracks, stains, and repairs at the same time. A metal panel may contain areas of untouched finish beside heavy oxidation. A poster may remain readable in one area while fading almost completely in another.` },
+  { type:'p', text:`The object exists between identities.` },
+  { type:'p', text:`It is still what it was, but it is also becoming something else.` },
+  { type:'p', text:`This in-between state makes decay different from simple destruction. Destruction suggests an abrupt end. Decay is gradual. It allows time to become part of the form.` },
+  { type:'p', text:`As the original design weakens, other forces begin to participate more visibly. The material starts to respond to its environment in ways that were never fully planned. The designer's control becomes less dominant. The object is no longer shaped only by intention.` },
+  { type:'p', text:`Decay introduces another author. Time. Weather. Use. Environment. Chance.` },
+  { type:'p', text:`These forces do not replace the original design immediately. They modify it.` },
+  { type:'p', text:`The result is a hybrid state between human intention and material transformation.` },
+  { type:'p', text:`This is why breakdown should not be understood only as collapse.` },
+  { type:'p', text:`Breakdown is also a transition. The surface loses one kind of order and begins developing another.` },
+  { type:'quote', text:'Breakdown removes control. It also creates form.' },
+
+  { type:'h2', text:'Chapter 02 — Patterns of Decay' },
+  { type:'p', text:`Decay does not affect every material in the same way. Different materials respond according to their physical properties, environmental conditions, and the forces acting on them. Metal oxidizes. Concrete fractures. Paint peels. Paper fades. Wood splits. Organic matter decomposes. Each process produces a different visual behavior.` },
+  { type:'p', text:`These behaviors can be read almost like a visual vocabulary.` },
+  { type:'p', text:`Rust spreads. Cracks branch. Paint peels in layers. Erosion fragments. Fading disappears.` },
+  { type:'p', text:`What makes these processes interesting is that they create patterns without being designed in the conventional sense. No graphic designer decides where a crack should move. No illustrator determines where oxidation should begin. No typographer chooses which letters sunlight will erase first. The patterns emerge from conditions.` },
+  { type:'p', text:`Material, environment, and time work together.` },
+  { type:'p', text:`Rust is one of the clearest examples. Oxidation begins through a chemical reaction between metal and its environment. Visually, the result often appears as irregular clusters, spreading stains, edges, blooms, and gradients of color. Orange, red, brown, black, and sometimes green or blue can develop depending on the material and conditions. The surface becomes less reflective and more textured. What once appeared industrial and controlled begins to look surprisingly organic.` },
+  { type:'p', text:`Rust does not usually create a perfect repeated pattern. It grows unevenly. Some areas expand quickly while others remain untouched. It spreads through vulnerability.` },
+  { type:'p', text:`This makes rust feel less like decoration and more like growth.` },
+  { type:'p', text:`Cracks behave differently. A crack begins as a break in continuity, but it often develops through branching. A single line divides into smaller lines. Those lines divide again. The resulting network can resemble roots, veins, rivers, lightning, or branches. A rigid artificial surface begins producing structures that visually resemble natural systems.` },
+  { type:'p', text:`The crack destroys one form of continuity while creating another kind of organization.` },
+  { type:'p', text:`Peeling works through layers. Paint that once created a single smooth surface begins to detach from its base. As it lifts, curls, and separates, older colors and materials become visible underneath. A wall can begin to contain several moments of time at once. One layer belongs to the present. Another belongs to an earlier renovation. Another may expose the original material beneath both.` },
+  { type:'p', text:`Peeling makes time visible through depth.` },
+  { type:'p', text:`Erosion works through removal. Wind, water, friction, pressure, or repeated contact slowly take material away. The process can soften edges, create holes, remove corners, or produce irregular boundaries. Solid forms become fragmented.` },
+  { type:'p', text:`The original shape is still present as a reference, but its outline becomes less certain.` },
+  { type:'p', text:`Fading creates a different kind of decay. Instead of adding texture or breaking material apart, fading reduces visual information. Color becomes weaker. Contrast disappears. Typography becomes harder to read. Images lose clarity. Eventually, only traces remain.` },
+  { type:'p', text:`Fading is decay through disappearance.` },
+  { type:'p', text:`These five behaviors—spread, branch, layer, fragment, disappear—can become a graphic system.` },
+  { type:'p', text:`They describe more than the appearance of damaged surfaces. They describe how transformation moves.` },
+  { type:'p', text:`Spread suggests expansion. Branch suggests division. Layer suggests accumulation and exposure. Fragment suggests loss of continuity. Disappear suggests gradual absence.` },
+  { type:'p', text:`Each of these can be translated into design decisions.` },
+  { type:'p', text:`A grid can spread beyond its original boundaries. A line can branch into multiple paths. Images can be layered so that older information remains partially visible. Text can fragment across a page. Typography can fade until only traces remain.` },
+  { type:'p', text:`The important thing is that the visual language comes from the behavior of decay rather than simply using photographs of damaged materials as decoration.` },
+  { type:'p', text:`The pattern should explain the process.` },
+  { type:'p', text:`This is also why repetition matters. Traditional patterns usually begin with a controlled unit that is duplicated across a surface. Decay works differently. It begins with a complete surface and creates difference within it.` },
+  { type:'p', text:`The pattern emerges through interruption.` },
+  { type:'p', text:`A clean wall becomes cracked. A uniform metal surface becomes rusted. A flat coat of paint becomes layered. A complete image becomes faded.` },
+  { type:'p', text:`Decay turns sameness into variation.` },
+  { type:'p', text:`This makes it possible to think of decay as a kind of uncontrolled pattern-making.` },
+  { type:'p', text:`The process is not fully random, because every material follows physical rules. Cracks respond to stress. Rust responds to moisture and oxygen. Peeling depends on adhesion. Erosion follows exposure and friction. Fading depends on light and pigment.` },
+  { type:'p', text:`Yet the final form cannot be fully predicted.` },
+  { type:'p', text:`This balance between structure and unpredictability is what makes decay visually powerful.` },
+  { type:'p', text:`It creates systems without exact repetition. It creates order without complete control.` },
+  { type:'p', text:`For this publication, these patterns become a way to translate physical decay into graphic form.` },
+  { type:'p', text:`Rust becomes spread. Cracks become branch. Peeling becomes layer. Erosion becomes fragment. Fading becomes disappear.` },
+  { type:'p', text:`The goal is not to imitate decay.` },
+  { type:'quote', text:'The goal is to understand its behavior and redesign that behavior into a visual system. Time does not decorate the surface. It rewrites it.' },
+
+  { type:'h2', text:'Chapter 03 — Another State' },
+  { type:'p', text:`When we look at decay, what has been lost is usually the first thing we notice. The original color is gone. The smooth surface has disappeared. The edge is broken. The printed information is incomplete. The protective layer has separated. The object no longer looks the way it was intended to look.` },
+  { type:'p', text:`This makes decay easy to describe through absence.` },
+  { type:'p', text:`Something was there. Now less of it remains.` },
+  { type:'p', text:`But loss tells only half of the story.` },
+  { type:'p', text:`Every act of removal changes the relationship between what remains. A missing section creates an opening. A peeled layer reveals another layer underneath. A crack divides one field into several. Corrosion introduces color where there was once uniformity. Erosion changes the outline of an object. A faded image may lose information, but the remaining fragments begin to carry a different kind of meaning.` },
+  { type:'p', text:`Decay removes one type of order while producing another.` },
+  { type:'p', text:`This is why transformation may be a more useful concept than destruction alone.` },
+  { type:'p', text:`Destruction suggests movement toward nothing. Transformation describes movement toward difference.` },
+  { type:'p', text:`A material in decay does not always disappear immediately. Instead, it passes through multiple states. Each state contains traces of what existed before and signs of what is becoming visible now.` },
+  { type:'p', text:`This creates an important tension.` },
+  { type:'p', text:`The object is no longer fully itself, but it is not yet gone.` },
+  { type:'p', text:`It exists in transition.` },
+  { type:'p', text:`A rusted metal surface is still metal, but its visual identity has changed. A cracked wall is still a wall, but its surface is now divided. A faded sign still contains language, but the missing parts change how it is read. A peeled wall contains both the present and the past at the same time.` },
+  { type:'p', text:`The material becomes layered with different states of existence.` },
+  { type:'p', text:`This is where decay begins to resemble memory.` },
+  { type:'p', text:`Memory is rarely complete. Parts remain. Parts disappear. Some fragments become stronger than others. What survives changes how we understand what was lost.` },
+  { type:'p', text:`Decay behaves in a similar way.` },
+  { type:'p', text:`It preserves fragments without preserving the whole.` },
+  { type:'p', text:`A ghost sign may no longer communicate its original message clearly, but it can still reveal that something existed there before. A corroded object may no longer have its original finish, but the remaining structure allows us to imagine what it once looked like. A broken surface makes its earlier completeness visible precisely because that completeness is no longer there.` },
+  { type:'p', text:`Absence becomes evidence.` },
+  { type:'p', text:`This allows decay to carry both loss and presence at the same time.` },
+  { type:'p', text:`The object is disappearing, but it is also revealing.` },
+  { type:'p', text:`Peeling reveals lower layers. Cracks reveal vulnerability. Rust reveals chemical change. Erosion reveals internal structure. Fading reveals the fragility of information.` },
+  { type:'p', text:`Decay becomes a process of exposure.` },
+  { type:'p', text:`This exposure can create new meaning.` },
+  { type:'p', text:`A surface that was once controlled becomes unpredictable. A material that was once standardized becomes individual. A form that was once complete becomes open.` },
+  { type:'p', text:`What appears damaged can begin to communicate another identity.` },
+  { type:'p', text:`This is not restoration. The original form is not returning.` },
+  { type:'p', text:`It is becoming something different.` },
+  { type:'p', text:`This distinction matters because rebirth is often misunderstood as a return to the beginning. But a transformed material cannot simply reverse time. The stain cannot completely become unstained. The crack cannot erase the fact that it existed. The rusted surface cannot return to a perfectly untouched state without intervention.` },
+  { type:'p', text:`Change leaves evidence.` },
+  { type:'p', text:`Another state carries the memory of the previous one.` },
+  { type:'p', text:`This is why decay can become the beginning of rebirth.` },
+  { type:'p', text:`It creates openings. It creates fragments. It creates space. It creates conditions in which something else can appear.` },
+  { type:'p', text:`A crack may allow water to enter. Moisture may allow moss to grow. A broken surface may collect soil. A decayed structure may become habitat. A faded image may become abstract. A fragment may become the starting point for a new composition.` },
+  { type:'p', text:`The disappearance of one form can create the possibility of another.` },
+  { type:'p', text:`Decay does not need to be understood as a final state.` },
+  { type:'p', text:'It can be understood as a threshold.' },
+  { type:'p', text:`The original design weakens. The material changes. The surface becomes open. Another system begins to enter.` },
+  { type:'quote', text:'Decay removes. But it also reveals.' },
+
+  { type:'booklet', text:'Booklet 03 — Rebirth' },
+  { type:'h2', text:'Chapter 01 — Reclaim' },
+  { type:'p', text:`Rebirth begins when the boundary between a material and its environment starts to disappear. As surfaces weaken, water settles into cracks, moss spreads, roots find openings, and organic growth begins to occupy human-made structures. The original form remains, but it is no longer shaped only by its designer. Nature begins to work with what has been left behind, creating a hybrid condition between the artificial and the organic. Reclaiming is not a return to an untouched natural state, but the creation of something new through the overlap of both systems. As human control weakens, another process of making begins.` },
+  { type:'quote', text:'Nature becomes the second maker.' },
+
+  { type:'h2', text:'Chapter 02 — Growth After Damage' },
+  { type:'p', text:`Growth can begin because a surface has been damaged. A crack creates an opening, peeling reveals another layer, and erosion creates spaces that did not exist before. What first appears as loss can become a condition for something else to enter. Damage changes a closed surface into an open one, allowing new relationships, materials, and forms to emerge. Absence is no longer simply emptiness; it becomes space with potential. In this way, the disappearance of one form can create the possibility of another.` },
+  { type:'quote', text:'What disappears makes room for what comes next.' },
+
+  { type:'h2', text:'Chapter 03 — New Order' },
+  { type:'p', text:`Rebirth does not mean restoring a material to its original condition. The cracks, stains, fragments, and traces of decay remain, but they begin to participate in another structure. A fragment can become a pattern, a hole can become a window, and an irregular edge can define a new boundary. The previous order has been broken, but disorder is not the final state. What remains is reorganized into something different, carrying evidence of both the original form and its transformation. Rebirth is not a return; it is the creation of a new order from what remains.` },
+  { type:'quote', text:'Rebirth is not restoration. It is reorganization.' },
+];
+
+// ---- build text DOM (plain, always sharp — the background corrodes, not the text) ----
+const root = document.getElementById('content');
+
+function buildParagraph(text, cls){
+  const p = document.createElement('p');
+  p.className = 'diss-p' + (cls ? ' ' + cls : '');
+  p.textContent = text;
+  return p;
+}
+
+BLOCKS.forEach(b=>{
+  if(b.type === 'eyebrow' || b.type === 'booklet'){
+    const el = document.createElement('div');
+    el.className = 'booklet-label';
+    el.textContent = b.text;
+    root.appendChild(el);
+  } else if(b.type === 'h2'){
+    const el = document.createElement('div');
+    el.className = 'chapter-title';
+    el.textContent = b.text.replace(/^Chapter\s+\d+\s*—\s*/i, '');
+    root.appendChild(el);
+  } else if(b.type === 'quote'){
+    root.appendChild(buildParagraph(b.text, 'quote'));
+  } else {
+    root.appendChild(buildParagraph(b.text));
+  }
+});
+root.appendChild(Object.assign(document.createElement('div'), { className:'end-space' }));
+
+// ===================================================================
+// Hero background — the first screen, before any text. The fractal
+// experiment didn't work out (too vivid/busy for the site, and fighting
+// the title for attention), so this is a real rust/oxidation photo
+// instead — on-theme with the whole "Traces of Time" subject rather than
+// an unrelated rainbow pattern. It's still not a static image, though:
+// rendered as a textured plane in its own small WebGL context so it can
+// get a slow "breathing" zoom, a gentle drift, and a very subtle organic
+// UV warp (the texture itself gently ripples, like the surface shifting)
+// — all small enough to read as "살짝씩 움직이는" rather than an obvious
+// slideshow pan. Fully decoupled from the scroll-driven page below; it
+// only keeps rendering while still at least partly on screen, so
+// scrolling past it stops costing anything.
+// ===================================================================
+(function(){
+  const canvas = document.getElementById('hero-canvas');
+  if(!canvas) return;
+
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias:false, alpha:false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+      uTexSize:    { value: new THREE.Vector2(1, 1) }, // set once the image finishes loading
+      uTime:       { value: 0 },
+      uMap:        { value: null },
+    },
+    vertexShader: `
+      varying vec2 vUv;
+      void main(){
+        vUv = uv;
+        gl_Position = vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      uniform vec2 uResolution;
+      uniform vec2 uTexSize;
+      uniform float uTime;
+      uniform sampler2D uMap;
+      varying vec2 vUv;
+
+      void main(){
+        // "cover" fit (same idea as CSS background-size:cover) — scales
+        // whichever axis needs it so the photo fills the frame with no
+        // letterboxing and no squash, cropping the overflow instead
+        float screenAspect = uResolution.x / uResolution.y;
+        float texAspect = uTexSize.x / uTexSize.y;
+        vec2 scale = screenAspect > texAspect
+          ? vec2(1.0, texAspect / screenAspect)
+          : vec2(screenAspect / texAspect, 1.0);
+        vec2 uv = (vUv - 0.5) * scale + 0.5;
+
+        // slow breathing zoom, centered — in by a few percent and back out
+        float zoom = 1.06 + 0.035 * sin(uTime * 0.045);
+        uv = (uv - 0.5) / zoom + 0.5;
+
+        // a gentle drift on top of the zoom, slow enough to read as the
+        // camera idly settling rather than panning anywhere in particular
+        uv += 0.012 * vec2(sin(uTime * 0.065), cos(uTime * 0.05));
+
+        // a very small organic ripple — cheap sine-based warp rather than
+        // full simplex noise, since the displacement is subtle enough
+        // that the difference isn't visible, and this is much cheaper
+        uv += 0.006 * vec2(
+          sin(uv.y * 14.0 + uTime * 0.3),
+          cos(uv.x * 11.0 + uTime * 0.24)
+        );
+
+        vec3 col = texture2D(uMap, clamp(uv, 0.001, 0.999)).rgb;
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `,
+  });
+
+  scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
+
+  new THREE.TextureLoader().load(HERO_TEXTURE, (tex) => {
+    // this raw shader samples and outputs the texture directly with no
+    // #include<encodings_fragment> step, so the GPU should hand back the
+    // photo's stored sRGB bytes untouched rather than auto-decoding them
+    // to linear on sample (which THREE.sRGBEncoding would trigger here) —
+    // decoding without a matching re-encode on the way out made the photo
+    // come out visibly darker than the source file.
+    tex.encoding = THREE.LinearEncoding;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    mat.uniforms.uMap.value = tex;
+    mat.uniforms.uTexSize.value.set(tex.image.width, tex.image.height);
+  });
+
+  function resize(){
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    mat.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+  }
+  window.addEventListener('resize', resize);
+
+  function animate(now){
+    // keep paying the render cost only while the hero is still at least
+    // roughly on screen — once you've scrolled well past it there's
+    // nothing to gain from still rendering it every frame
+    if(window.scrollY < window.innerHeight * 1.15 && mat.uniforms.uMap.value){
+      mat.uniforms.uTime.value = now / 1000;
+      renderer.render(scene, camera);
+    }
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+})();
+
+// ===================================================================
+// Image network — hidden behind the white page, always running.
+// Images sit on the SURFACE of a sphere (Fibonacci-sphere distribution,
+// so coverage is even with no clumping/gaps), each one facing inward
+// toward the center, with a thin red thread to its nearest neighbors.
+// Seen from far away this reads as one coherent, roughly spherical
+// form; the camera's distance from the center is driven by scroll
+// progress, so scrolling through the book doubles as diving from
+// "looking at a small distant orb" down to "standing at its center,
+// surrounded by images on every side." Click-and-drag grabs the sphere
+// itself and spins it, like turning a globe in your hands — the camera
+// holds still on one axis; letting go leaves it carrying momentum that
+// slowly decays rather than stopping dead. A trackpad pinch (or
+// Ctrl+wheel) can always pull the camera back out, even at the very
+// bottom of the scroll.
+// ===================================================================
+(function(){
+  const canvas = document.getElementById('three-canvas');
+
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 5000);
+
+  // everything that makes up the blob — cards + threads — lives inside this
+  // group rather than directly in the scene, so grabbing and dragging can
+  // spin the sphere itself (like turning a globe in your hands) instead of
+  // turning the camera's head to look around it.
+  const world = new THREE.Group();
+  world.rotation.order = 'YXZ';
+  scene.add(world);
+
+  const loader = new THREE.TextureLoader();
+
+  // ---- organic-blob-surface placement --------------------------------
+  // A perfectly even Fibonacci sphere plus exact-nearest-neighbor threads
+  // reads as a soccer ball / geodesic dome — too regular, too man-made.
+  // Two changes break that: (1) each point's direction is pulled partway
+  // toward a random direction, so spacing is no longer perfectly even,
+  // and (2) the radius itself is warped by a handful of smooth random
+  // "bumps" (like overlapping soap-bubble blobs), so the overall
+  // silhouette is an organic, lumpy mass rather than a mathematical
+  // sphere — closer to a cell cluster or coral growth.
+  const SPHERE_RADIUS = 650;
+
+  function fibonacciSpherePoint(i, n){
+    // evenly-spaced points on a unit sphere, no pole-bunching — used only
+    // as a starting point, then de-regularized below
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    const y = 1 - (i / Math.max(1, n - 1)) * 2;
+    const r = Math.sqrt(Math.max(0, 1 - y*y));
+    const theta = goldenAngle * i;
+    return new THREE.Vector3(Math.cos(theta)*r, y, Math.sin(theta)*r);
+  }
+
+  const BUMPS = Array.from({ length: 7 }, () => ({
+    center: new THREE.Vector3(Math.random()*2-1, Math.random()*2-1, Math.random()*2-1).normalize(),
+    strength: (Math.random()*2 - 1) * 0.4,   // -0.4..+0.4, dent or bulge
+    sharpness: 1.5 + Math.random()*3.5        // how localized the bump is
+  }));
+  function organicRadius(dir){
+    let mod = 0;
+    BUMPS.forEach(b => {
+      const d = Math.max(0, dir.dot(b.center));
+      mod += b.strength * Math.pow(d, b.sharpness);
+    });
+    return SPHERE_RADIUS * (1 + mod);
+  }
+
+  // positions (and each node's base image size, needed below to keep
+  // threads clear of the image planes) are computed up front, not inside
+  // the mesh-build loop, so the thread network can do nearest-neighbor
+  // lookups across the whole set before any texture has finished loading
+  const nodePositions = [];
+  const nodeBaseSize = [];
+  IMAGES.forEach((_, i) => {
+    const base = fibonacciSpherePoint(i, IMAGES.length);
+    // pull each point partway toward an independent random direction —
+    // breaks the perfectly even spacing that reads as "geodesic dome"
+    const randomDir = new THREE.Vector3(Math.random()*2-1, Math.random()*2-1, Math.random()*2-1).normalize();
+    const dir = base.lerp(randomDir, 0.3).normalize();
+    const radius = organicRadius(dir) * (0.94 + Math.random()*0.12);
+    nodePositions.push(dir.multiplyScalar(radius));
+    nodeBaseSize.push(105 * (0.6 + Math.random()*0.8));
+  });
+
+  // ---- random corrosion-texture overlay on each photo ----------------
+  // The 12 patina/rust/mold photos the user supplied get stamped onto
+  // each of the 59 network photos — one random texture per photo, each
+  // at a random rotation, flip, crop offset and opacity, so no two
+  // photos (and no two uses of the same texture) look stamped-identical.
+  // Done once per photo with a plain Canvas 2D composite (draw the photo,
+  // then draw the texture over it with `multiply` blend so dark/colored
+  // areas tint and darken the photo while bright/transparent areas of
+  // the texture leave it alone) rather than a custom shader — simpler,
+  // and it only runs once at load time, never per frame. The composited
+  // canvas becomes the plane's texture in place of the plain photo.
+  function loadImageEl(src){
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
+  }
+  const overlayImagesPromise = OVERLAY_TEXTURES.length
+    ? Promise.all(OVERLAY_TEXTURES.map(loadImageEl))
+    : Promise.resolve([]);
+
+  // draws `img` centered over a canvasW x canvasH area, rotated by
+  // `angle` and optionally flipped, scaled generously off the canvas's
+  // own diagonal so the rotated image always fully covers it with no
+  // gaps at the corners, with a small random pan (jitterX/jitterY, each
+  // in roughly [-1,1]) so the same source texture crops differently
+  // from one use to the next
+  function drawCoverRotated(ctx, img, canvasW, canvasH, angle, flipX, flipY, jitterX, jitterY){
+    const diag = Math.sqrt(canvasW*canvasW + canvasH*canvasH);
+    const scale = (diag / Math.min(img.width, img.height)) * 1.06;
+    const dw = img.width * scale;
+    const dh = img.height * scale;
+    ctx.save();
+    ctx.translate(canvasW/2, canvasH/2);
+    ctx.rotate(angle);
+    ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+    ctx.drawImage(img, -dw/2 + jitterX*dw*0.35, -dh/2 + jitterY*dh*0.35, dw, dh);
+    ctx.restore();
+  }
+
+  // 'multiply' can only ever darken — on an already-dark base photo there's
+  // almost no headroom left to darken further, so the overlay's own pattern
+  // compresses into near-invisibility (dark × anything ≈ still dark). This
+  // samples a tiny downscaled copy of the photo once, at load time, to
+  // measure its average luminance, so dark photos can be given a different
+  // blend mode that actually has room to show the overlay.
+  function computeAvgLuminance(img){
+    const s = 8;
+    const c = document.createElement('canvas');
+    c.width = s; c.height = s;
+    const cx = c.getContext('2d');
+    cx.drawImage(img, 0, 0, s, s);
+    const data = cx.getImageData(0, 0, s, s).data;
+    let sum = 0, n = 0;
+    for(let i = 0; i < data.length; i += 4){
+      sum += 0.2126*data[i] + 0.7152*data[i+1] + 0.0722*data[i+2];
+      n++;
+    }
+    return sum / n; // 0..255
+  }
+
+  // draws one full frame of a photo's corrosion treatment at a given
+  // `progress` (0 = resting look, 1 = fully focused): the overlay stamp
+  // deepens from its resting alpha up to fully saturated, then in the back
+  // half of the range the SAME overlay texture is drawn again — same crop,
+  // same rotation — but this time in the 'color' blend mode, which takes
+  // only its hue/saturation and keeps the photo's own brightness. So the
+  // "알록달록" bloom isn't an invented rainbow wash; it's literally that
+  // corrosion texture's own coloring taking over the photo. progress=0
+  // reproduces the original one-time bake exactly, so there's no visible
+  // pop when a click-to-focus transition begins.
+  //
+  // the first pass uses params.blendMode, chosen once per photo from its
+  // measured brightness: 'multiply' darkens a light/paper-ish photo (the
+  // original look), 'screen' instead lightens — so on a dark photo the
+  // overlay's bright flecks read as pale marks glowing up out of the dark,
+  // rather than vanishing into it. Either way it's the same texture, same
+  // crop, just the one blend operation that actually has visible headroom.
+  function drawPhotoFrame(ctx, w, h, photoImg, overlayImg, params, progress){
+    ctx.clearRect(0, 0, w, h);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.drawImage(photoImg, 0, 0, w, h);
+
+    if(overlayImg && params){
+      ctx.globalCompositeOperation = params.blendMode || 'multiply';
+      ctx.globalAlpha = params.baseAlpha + (1 - params.baseAlpha) * progress;
+      drawCoverRotated(ctx, overlayImg, w, h, params.angle, params.flipX, params.flipY, params.jitterX, params.jitterY);
+
+      const colorT = Math.max(0, (progress - 0.55) / 0.45);
+      if(colorT > 0){
+        ctx.globalCompositeOperation = 'color';
+        ctx.globalAlpha = Math.min(1, colorT);
+        drawCoverRotated(ctx, overlayImg, w, h, params.angle, params.flipX, params.flipY, params.jitterX, params.jitterY);
+      }
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+  }
+
+  function compositeWithOverlay(photoImg, overlayImg, params){
+    const w = photoImg.naturalWidth || photoImg.width;
+    const h = photoImg.naturalHeight || photoImg.height;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    drawPhotoFrame(ctx, w, h, photoImg, overlayImg, params, 0);
+    return canvas;
+  }
+
+  // kept so the click-to-focus feature below can raycast against exactly
+  // these 59 objects (never the thread meshes) and look any of them up by
+  // index
+  const meshes = [];
+
+  IMAGES.forEach((src, i) => {
+    const geo = new THREE.PlaneGeometry(1, 1);
+    const mat = new THREE.MeshBasicMaterial({ color:0xdddddd, side:THREE.DoubleSide });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(nodePositions[i]);
+    mesh.userData.index = i;
+
+    // face the plane INWARD (toward the center) rather than outward, so
+    // it reads correctly once the camera is inside the sphere, which is
+    // where most of the experience actually happens
+    mesh.lookAt(0, 0, 0);
+    mesh.rotateY(Math.PI);
+
+    const baseSize = nodeBaseSize[i];
+    mesh.scale.set(baseSize, baseSize, 1);
+
+    world.add(mesh);
+    meshes.push(mesh);
+
+    loader.load(src, (tex) => {
+      const photoImg = tex.image;
+      const aspect = photoImg.width / photoImg.height;
+      mesh.scale.set(baseSize * aspect, baseSize, 1);
+      mesh.userData.photoImg = photoImg;
+      // the final resting scale, remembered so the hold-to-dissolve regrow
+      // animation (below) can scale back up to exactly this, not a guess
+      mesh.userData.fullScaleX = baseSize * aspect;
+      mesh.userData.fullScaleY = baseSize;
+
+      overlayImagesPromise.then((overlayImgs) => {
+        if(overlayImgs.length){
+          const overlayImg = overlayImgs[Math.floor(Math.random() * overlayImgs.length)];
+          // frozen once, here, rather than re-rolled — so the live
+          // "click to focus" recomposite (further below) reproduces this
+          // exact crop/rotation/flip, and only the INTENSITY changes,
+          // never the stamp itself (no visible pop when focus begins)
+          const avgLum = computeAvgLuminance(photoImg);
+          const params = {
+            angle: Math.random() * Math.PI * 2,
+            flipX: Math.random() < 0.5,
+            flipY: Math.random() < 0.5,
+            jitterX: Math.random()*2-1,
+            jitterY: Math.random()*2-1,
+            baseAlpha: 0.4 + Math.random() * 0.3,
+            blendMode: avgLum < 90 ? 'screen' : 'multiply',
+          };
+          mesh.userData.overlayImg = overlayImg;
+          mesh.userData.overlayParams = params;
+          const composited = compositeWithOverlay(photoImg, overlayImg, params);
+          const compositeTex = new THREE.CanvasTexture(composited);
+          compositeTex.encoding = THREE.sRGBEncoding;
+          mat.map = compositeTex;
+          // kept live (not just the one-time bake) so the hold-to-dissolve
+          // feature can later stamp OTHER dissolved photos onto this same
+          // canvas and just flag the texture dirty, no re-composite needed
+          mesh.userData.bakedCanvas = composited;
+          mesh.userData.bakedCtx = composited.getContext('2d');
+          mesh.userData.bakedTex = compositeTex;
+        } else {
+          tex.encoding = THREE.sRGBEncoding;
+          mat.map = tex;
+          const w = photoImg.naturalWidth || photoImg.width;
+          const h = photoImg.naturalHeight || photoImg.height;
+          const plainCanvas = document.createElement('canvas');
+          plainCanvas.width = w; plainCanvas.height = h;
+          const pctx = plainCanvas.getContext('2d');
+          pctx.drawImage(photoImg, 0, 0, w, h);
+          const plainTex = new THREE.CanvasTexture(plainCanvas);
+          plainTex.encoding = THREE.sRGBEncoding;
+          mesh.userData.bakedCanvas = plainCanvas;
+          mesh.userData.bakedCtx = pctx;
+          mesh.userData.bakedTex = plainTex;
+          mat.map = plainTex;
+        }
+        mat.color.set(0xffffff);
+        mat.needsUpdate = true;
+      });
+    });
+  });
+
+  // stamps a dissolved photo's own pixels, color-shifted, onto another
+  // still-present photo's baked canvas — drawn straight onto the SAME
+  // canvas backing that mesh's live texture, so it shows up immediately
+  // and persists (survives that mesh's own later click-to-focus opens,
+  // since those read from this same baked texture as their starting map)
+  function stampImageOnto(targetMesh, sourceImg){
+    const canvas = targetMesh.userData.bakedCanvas;
+    const ctx = targetMesh.userData.bakedCtx;
+    const tex = targetMesh.userData.bakedTex;
+    if(!canvas || !ctx || !tex || !sourceImg) return;
+    const w = canvas.width, h = canvas.height;
+    const stampFrac = 0.22 + Math.random() * 0.14;
+    const sw = w * stampFrac;
+    const sAspect = (sourceImg.naturalWidth || sourceImg.width) / (sourceImg.naturalHeight || sourceImg.height || 1);
+    const sh = sw / sAspect;
+    const cx = w * (0.18 + Math.random() * 0.64);
+    const cy = h * (0.18 + Math.random() * 0.64);
+    const angle = (Math.random() * 2 - 1) * 0.35;
+
+    // snapshot the photo exactly as it looks right now, so the fade-in
+    // below can redraw [base + stamp-at-current-alpha] fresh every frame
+    // instead of drawing the stamp again on top of itself each frame
+    // (which would stack and over-darken rather than simply fade in) —
+    // this is the "goes to another image" half of the dissolve actually
+    // arriving as a visible process, not an instant pop
+    const base = document.createElement('canvas');
+    base.width = w; base.height = h;
+    base.getContext('2d').drawImage(canvas, 0, 0);
+
+    const STAMP_FADE_MS = 900;
+    const startT = performance.now();
+    (function animStamp(){
+      const t = Math.min(1, (performance.now() - startT) / STAMP_FADE_MS);
+      ctx.clearRect(0, 0, w, h);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      ctx.drawImage(base, 0, 0);
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(angle);
+      ctx.globalCompositeOperation = 'color';
+      ctx.globalAlpha = 0.85 * t;
+      ctx.drawImage(sourceImg, -sw / 2, -sh / 2, sw, sh);
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = 0.22 * t;
+      ctx.drawImage(sourceImg, -sw / 2, -sh / 2, sw, sh);
+      ctx.restore();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+      tex.needsUpdate = true;
+
+      if(t < 1) requestAnimationFrame(animStamp);
+    })();
+  }
+
+  // picks a landing spot for the stamp/travel-sparks among the 4 photos
+  // physically closest to the one dissolving — using nodePositions (the
+  // canonical sphere-local position for that index), not mesh.position,
+  // because a FOCUSED photo's mesh.position is temporarily its pulled-to-
+  // center pose, which would make "nearest" meaningless
+  const DISSOLVE_TARGET_POOL = 4;
+  function pickRandomOtherMesh(excludeIndex){
+    const origin = nodePositions[excludeIndex];
+    const candidates = meshes
+      .map((m, idx) => ({ m, idx }))
+      .filter(({ m, idx }) => idx !== excludeIndex && m.userData.bakedCanvas && !m.userData.dissolveState)
+      .map(({ m, idx }) => ({ m, d: nodePositions[idx].distanceToSquared(origin) }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, DISSOLVE_TARGET_POOL);
+    if(!candidates.length) return null;
+    return candidates[Math.floor(Math.random() * candidates.length)].m;
+  }
+
+  // ---- red thread network: each image to a few nearest neighbors ----
+  // Rendered as real camera-facing quads with a small custom shader, not
+  // GL line primitives — `linewidth` on THREE.LineBasicMaterial is
+  // silently ignored on most GPUs/browsers (stuck at 1px). The usual
+  // off-the-shelf answer to "a real textured line in three.js" is
+  // spite/THREE.MeshLine (now maintained as pmndrs/meshline on GitHub) —
+  // it does exactly this: a ribbon of camera-facing quads with a texture
+  // mapped along its length. This file is a single self-contained HTML
+  // page with no external script/CDN dependency though, so rather than
+  // vendoring that whole library in, the same core technique is built
+  // directly into the shader already here: each thread gets a small
+  // procedural "twisted two-ply fiber" texture (generated once on a
+  // canvas, no image asset needed), with a visible braided seam and a
+  // soft round cross-section, which also tames the "flat marker-line"
+  // look since the edges fade instead of cutting off hard. Note that
+  // the twist is real geometric-scale detail, not a screen-space
+  // effect — from far away (small distant orb) it will compress below
+  // a pixel and read as a plain soft line, same as a real thread would
+  // at that distance; it only becomes visible once you're scrolled in
+  // close enough for a thread to actually span some real screen space.
+  //
+  // Connections no longer stop short at a computed "edge" of each
+  // photo — that margin math was guessing at each photo's rendered
+  // footprint (which depends on its real aspect ratio, only known once
+  // the image finishes loading) and sometimes guessed short, which is
+  // exactly what was reading as "cut off." Instead each thread now runs
+  // the FULL distance between the two node centers, and a depth-buffer
+  // polygon offset pushes the thread's drawn depth slightly back at
+  // every pixel, so wherever it overlaps an opaque photo, the photo —
+  // always drawn at its true depth — wins and simply covers the
+  // overlap. The thread visibly runs right up to and into each photo
+  // with no gap, no matter the photo's real shape, and no overshoot
+  // ever pokes out past it.
+  // thickness itself now scrolls too: thin and delicate from far away
+  // (where a thread is only a few screen pixels long anyway — no room
+  // for any texture to register, same as a real thread seen from a
+  // distance), thickening gradually toward the "surrounded, standing
+  // at the center" end of the scroll, where threads actually span real
+  // screen space and the twisted-fiber texture has something to show
+  const THREAD_THICKNESS_FAR_PX = 0.9;
+  const THREAD_THICKNESS_NEAR_PX = 1.8;
+  // how many twist cycles a thread shows end-to-end. Tying this to raw
+  // world distance (what an earlier version did) meant a few-hundred-
+  // unit-long thread packed in dozens of cycles — once that's rendered
+  // into the ~100-300 screen pixels a thread actually occupies, it's
+  // many more cycles than screen pixels, so it aliases into a flat
+  // smear and the twist disappears entirely regardless of contrast.
+  // Capping the cycle count keeps every thread's pattern coarse enough
+  // to actually survive being drawn this thin.
+  const THREAD_CYCLES_MIN = 1.5, THREAD_CYCLES_MAX = 4;
+  let threadMaterial;
+
+  function makeThreadTexture(){
+    // small power-of-two canvas so RepeatWrapping is safe on WebGL1:
+    // x = across the thread's width, y = along its length (tiles)
+    const w = 32, h = 128;
+    const cnv = document.createElement('canvas');
+    cnv.width = w; cnv.height = h;
+    const ctx = cnv.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    for(let y = 0; y < h; y++){
+      const u = y / h; // 0..1, an exact number of twist periods — tiles seamlessly
+      for(let x = 0; x < w; x++){
+        const v = x / (w - 1); // 0..1 across the width
+
+        // rounded cross-section: solid/opaque in the middle, soft
+        // transparent falloff at the edges, like a real fiber strand
+        // rather than a flat ruled line
+        const edge = 1 - Math.pow(Math.abs(v - 0.5) * 2, 1.6);
+        const coreAlpha = Math.max(0, edge);
+
+        // A thread drawn only 1.5-2.5 screen pixels wide can't actually
+        // resolve a twisting diagonal weave — tested directly (rendered
+        // one huge, then shrunk down to real on-screen size) and it just
+        // disappears, since that needs several pixels ACROSS the width
+        // to read, which this never has. What DOES survive at that
+        // width is a simple one-sided highlight: fake the thread as a
+        // lit half-cylinder (a surface normal bulging toward the
+        // viewer, lit from one side), which only needs a left-to-right
+        // gradient to register as "round cord", not "flat painted
+        // line" — a much cheaper ask of so few pixels.
+        const nx = (v - 0.5) * 2;                         // -1..1 across the width
+        const nz = Math.sqrt(Math.max(0, 1 - nx * nx));   // cylinder bulge toward viewer
+        const lightDir = { x: 0.55, z: 0.84 };             // light from one side, like a sheen
+        let lambert = Math.max(0, nx * lightDir.x + nz * lightDir.z);
+        lambert = Math.pow(lambert, 1.4);                  // sharpen into a highlight band
+        let fiber = 0.35 + lambert * 0.75;                  // 0.35 shadow .. ~1.0 highlight
+
+        // a faint twisting ply pattern layered on top — too subtle to
+        // read as its own thing this thin, but it keeps the surface
+        // from feeling perfectly uniform once you ARE close enough
+        // (deep scroll, thicker line) to see more than one pixel of it
+        const phaseA = u * Math.PI * 2 + v * Math.PI * 2;
+        const twist = Math.max(Math.sin(phaseA), Math.sin(phaseA + Math.PI)) * 0.5 + 0.5;
+        fiber *= 0.88 + twist * 0.12;
+
+        const idx = (y * w + x) * 4;
+        const g = Math.round(Math.min(1, fiber) * 255);
+        img.data[idx+0] = g;
+        img.data[idx+1] = g;
+        img.data[idx+2] = g;
+        img.data[idx+3] = Math.round(coreAlpha * 255);
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const tex = new THREE.CanvasTexture(cnv);
+    tex.wrapS = THREE.ClampToEdgeWrapping; // across width — no repeat needed
+    tex.wrapT = THREE.RepeatWrapping;      // along length — tiles the twist
+    // this is the actual reason the twist wasn't showing up at all: with
+    // mipmapping on (the three.js default), the GPU picks ONE shared mip
+    // level for a texture fetch, chosen by whichever axis is squeezed
+    // hardest — and the width axis is squeezed enormously (32 texels
+    // crammed into a couple of screen pixels). That forces a heavily
+    // blurred mip level for the WHOLE texture, wiping out the
+    // along-length twist pattern too even though that axis individually
+    // isn't undersampled anywhere near as much. Turning mipmaps off and
+    // sampling the full-resolution texture directly (plain bilinear)
+    // fixes exactly this — no external library changes that, since any
+    // library doing textured ribbon lines (MeshLine included) hits the
+    // same default unless it also turns mipmapping off.
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  // A diagonal woven texture needs several screen pixels of WIDTH to
+  // read at all — tested directly (rendered huge, then shrunk to the
+  // real ~1.5-2.6px on-screen width) and it just optically disappears,
+  // no matter the shader or library, because that's a hard pixel-
+  // density limit, not an implementation gap. What doesn't hit that
+  // limit is the thread's actual PATH: real thread/string is never
+  // perfectly taut and dead straight, it sags and drapes a little —
+  // and that's a shape difference, visible at any thickness, at any
+  // zoom, since it's not asking anything of sub-pixel detail. So each
+  // connection is now a gently bowed curve (like a loosely strung
+  // thread between two pins) instead of a straight chord, bulging a
+  // small, randomized amount in a randomized direction, tapering back
+  // to exactly the node centers at both ends — still a full, real
+  // connection, never trimmed short.
+  const THREAD_SAG_SEGMENTS = 7; // sub-segments approximating the curve
+  const UP = new THREE.Vector3(0, 1, 0);
+  const RIGHT = new THREE.Vector3(1, 0, 0);
+
+  // filled in by buildThreads() below, then read by updateNodeThreads()
+  // (click-to-focus feature, further down) to live-restretch a node's
+  // threads as its photo gets pulled out toward the camera
+  let threadGeo = null;
+  let connectionsByNode = null;
+
+  (function buildThreads(){
+    const starts = [], ends = [], params = [], uRanges = [], indices = [];
+    let vIndex = 0;
+
+    const used = new Set();
+    connectionsByNode = nodePositions.map(() => []);
+
+    // builds one connection's geometry (shared by both the nearest-
+    // neighbor pass and the long cross-sphere pass below) — dedups via
+    // `used` so a pair picked by both passes only ever gets drawn once.
+    function connect(i, j){
+      if(i === j) return;
+      const key = i < j ? `${i}_${j}` : `${j}_${i}`;
+      if(used.has(key)) return;
+      used.add(key);
+
+      const p = nodePositions[i], q = nodePositions[j];
+      const fullLength = p.distanceTo(q);
+      if(fullLength < 1) return;
+      const dirNorm = new THREE.Vector3().subVectors(q, p).normalize();
+
+      // a randomized sag direction, perpendicular to the thread —
+      // different for every connection, so they don't all bow the
+      // same way like ribs on a fan
+      const ref = Math.abs(dirNorm.y) < 0.9 ? UP : RIGHT;
+      const perp1 = new THREE.Vector3().crossVectors(dirNorm, ref).normalize();
+      const perp2 = new THREE.Vector3().crossVectors(dirNorm, perp1).normalize();
+      const angle = Math.random() * Math.PI * 2;
+      const bulgeDir = perp1.clone().multiplyScalar(Math.cos(angle))
+        .addScaledVector(perp2, Math.sin(angle));
+      const amp = fullLength * (0.015 + Math.random() * 0.03);
+      const vBase = vIndex; // this connection's first vertex — recorded per-endpoint below
+
+      const cycles = Math.min(THREAD_CYCLES_MAX, Math.max(THREAD_CYCLES_MIN, fullLength / 90));
+
+      const curvePts = [];
+      for(let k = 0; k <= THREAD_SAG_SEGMENTS; k++){
+        const t = k / THREAD_SAG_SEGMENTS;
+        const taper = Math.sin(t * Math.PI); // 0 at both ends, so it still meets the node centers exactly
+        curvePts.push(p.clone().lerp(q, t).addScaledVector(bulgeDir, amp * taper));
+      }
+
+      for(let k = 0; k < THREAD_SAG_SEGMENTS; k++){
+        const start = curvePts[k], end = curvePts[k + 1];
+        const u0 = (k / THREAD_SAG_SEGMENTS) * cycles;
+        const u1 = ((k + 1) / THREAD_SAG_SEGMENTS) * cycles;
+
+        // 4 verts per sub-segment: (start,side-1) (start,side+1) (end,side-1) (end,side+1)
+        [[start,end,-1,0],[start,end,1,0],[start,end,-1,1],[start,end,1,1]]
+          .forEach(([a,b,side,endFlag]) => {
+            starts.push(a.x, a.y, a.z);
+            ends.push(b.x, b.y, b.z);
+            params.push(side, endFlag);
+            uRanges.push(u0, u1);
+          });
+        indices.push(vIndex, vIndex+2, vIndex+1, vIndex+1, vIndex+2, vIndex+3);
+        vIndex += 4;
+      }
+
+      // record both endpoints so a focused node can find and re-stretch
+      // every thread touching it — 'p'/'q' is which side of connect()'s
+      // own (p,q) this node was, needed so updateNodeThreads() substitutes
+      // the live position into the right slot
+      connectionsByNode[i].push({ otherIndex: j, role: 'p', vBase, bulgeDir, amp });
+      connectionsByNode[j].push({ otherIndex: i, role: 'q', vBase, bulgeDir, amp });
+    }
+
+    // pass 1 — nearest neighbors: the local mesh that reads as a coherent
+    // surface up close (a random count per node, 5-8, so it doesn't
+    // tessellate into one uniform pattern).
+    nodePositions.forEach((p, i) => {
+      const threadsForThisNode = 5 + Math.floor(Math.random()*4);
+      nodePositions
+        .map((q, j) => j === i ? null : { j, d: p.distanceTo(q) })
+        .filter(Boolean)
+        .sort((a, b) => a.d - b.d)
+        .slice(0, threadsForThisNode)
+        .forEach(({ j }) => connect(i, j));
+    });
+
+    // pass 2 — long cross-sphere connections: a few picks per node from
+    // anywhere else in the set, not just its nearest neighbors. Most of
+    // the other 58 nodes sit well across the sphere from any given one,
+    // so a plain uniform pick naturally lands far more often than not —
+    // these are what actually cut diagonally through the interior rather
+    // than just hugging the surface, giving the tangled "cat's cradle"
+    // look instead of a clean geodesic shell.
+    const CROSS_PER_NODE_MIN = 3, CROSS_PER_NODE_MAX = 5;
+    nodePositions.forEach((p, i) => {
+      const n = nodePositions.length;
+      const crossCount = CROSS_PER_NODE_MIN + Math.floor(Math.random()*(CROSS_PER_NODE_MAX - CROSS_PER_NODE_MIN + 1));
+      for(let c = 0; c < crossCount; c++){
+        const j = Math.floor(Math.random()*n);
+        connect(i, j);
+      }
+    });
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('aStart', new THREE.Float32BufferAttribute(starts, 3));
+    geo.setAttribute('aEnd', new THREE.Float32BufferAttribute(ends, 3));
+    geo.setAttribute('aParams', new THREE.Float32BufferAttribute(params, 2));
+    geo.setAttribute('aURange', new THREE.Float32BufferAttribute(uRanges, 2));
+    geo.setIndex(indices);
+    threadGeo = geo;
+
+    threadMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        uThickness:  { value: THREAD_THICKNESS_FAR_PX },
+        uColor:      { value: new THREE.Color(0xb11a2e) },
+        uOpacity:    { value: 0.7 },
+        uMap:        { value: makeThreadTexture() },
+      },
+      vertexShader: `
+        attribute vec3 aStart;
+        attribute vec3 aEnd;
+        attribute vec2 aParams;   // x: side (-1/+1), y: which end (0=start,1=end)
+        attribute vec2 aURange;   // x/y: texture-length coord at this sub-segment's start/end
+        uniform vec2 uResolution;
+        uniform float uThickness;
+        varying vec2 vUv;
+        void main(){
+          vec4 clipA = projectionMatrix * modelViewMatrix * vec4(aStart, 1.0);
+          vec4 clipB = projectionMatrix * modelViewMatrix * vec4(aEnd, 1.0);
+          vec4 clipPos = mix(clipA, clipB, aParams.y);
+
+          // direction + perpendicular computed in aspect-correct pixel
+          // space from the SAME two endpoints for every vertex of this
+          // segment, so the offset never twists into a bowtie
+          vec2 screenA = clipA.xy / clipA.w * uResolution;
+          vec2 screenB = clipB.xy / clipB.w * uResolution;
+          vec2 dir = screenB - screenA;
+          float dlen = length(dir);
+          vec2 normal = dlen > 0.0001 ? vec2(-dir.y, dir.x) / dlen : vec2(0.0, 1.0);
+
+          vec2 offsetPx = normal * (uThickness * 0.5) * aParams.x;
+          clipPos.xy += offsetPx * (2.0 / uResolution) * clipPos.w;
+
+          vUv = vec2((aParams.x + 1.0) * 0.5, mix(aURange.x, aURange.y, aParams.y));
+          gl_Position = clipPos;
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform float uOpacity;
+        uniform sampler2D uMap;
+        varying vec2 vUv;
+        void main(){
+          vec4 tex = texture2D(uMap, vUv);
+          gl_FragColor = vec4(uColor * tex.rgb, tex.a * uOpacity);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      // pushes the thread's tested depth slightly away from the camera
+      // at every pixel, so an opaque photo at (effectively) the same
+      // depth always wins and covers the overlap, regardless of which
+      // was drawn first or which side the camera is viewing from
+      polygonOffset: true,
+      polygonOffsetFactor: 4,
+      polygonOffsetUnits: 4,
+    });
+
+    // The depth test above is what gives a thread the clean "runs right up
+    // to and into its own photo's edge, no overshoot" look — but with only
+    // one shared depth buffer, it can't tell "this thread's own endpoint
+    // photo" apart from "some unrelated photo that merely happens to sit
+    // between this thread and the camera right now." For a node whose
+    // placement (the randomized pull + organic bumps above) lands it off
+    // to one side of the main mass, its nearest-neighbor connections often
+    // have to cross behind a whole wall of other, unrelated cards — and
+    // the depth test then hides the ENTIRE thread behind them, not just
+    // the bit touching its own photo. From the camera that reads as "this
+    // photo has no thread at all," even though the connection is really
+    // there in the data.
+    // Fixed by drawing every thread twice: first a faint, low-opacity
+    // "ghost" copy with depth testing turned off entirely (so it is never
+    // hidden by anything, anywhere), then the normal crisp copy on top.
+    // Wherever nothing is in the way — the common case — the crisp copy
+    // fully covers the ghost and nothing changes visually. Wherever a
+    // thread would otherwise vanish behind unrelated photos, the ghost
+    // still shows through as a soft, unbroken red line, so no connection
+    // can ever read as a gap.
+    const threadGhostMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uResolution: threadMaterial.uniforms.uResolution, // shared refs: thickness/resize updates below apply to both automatically
+        uThickness:  threadMaterial.uniforms.uThickness,
+        uColor:      threadMaterial.uniforms.uColor,
+        uOpacity:    { value: 0.22 },
+        uMap:        threadMaterial.uniforms.uMap,
+      },
+      vertexShader: threadMaterial.vertexShader,
+      fragmentShader: `
+        uniform vec3 uColor;
+        uniform float uOpacity;
+        uniform sampler2D uMap;
+        varying vec2 vUv;
+        void main(){
+          // alpha-only sample (the rounded cross-section falloff) — skips
+          // the fiber/highlight shading so the ghost reads as a soft flat
+          // glow rather than a second fully-detailed thread
+          float a = texture2D(uMap, vUv).a;
+          gl_FragColor = vec4(uColor, a * uOpacity);
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    });
+
+    const threadGhostMesh = new THREE.Mesh(geo, threadGhostMaterial);
+    threadGhostMesh.renderOrder = 0; // always drawn first, so the crisp copy below layers on top of it
+    world.add(threadGhostMesh);
+
+    const threadMesh = new THREE.Mesh(geo, threadMaterial);
+    threadMesh.renderOrder = 1;
+    world.add(threadMesh);
+  })();
+
+  // ---- live thread restretching, used by the click-to-focus feature
+  // below: recomputes just the handful of sub-segments belonging to one
+  // node's connections (using the exact same sag formula buildThreads()
+  // used to build them), writing straight into the shared thread
+  // geometry's position buffers — so a pulled-out photo's threads visibly
+  // stretch to follow it instead of staying anchored to its resting spot.
+  function writeCurveToBuffers(startsArr, endsArr, vBase, p, q, bulgeDir, amp){
+    const segs = THREAD_SAG_SEGMENTS;
+    const curvePts = [];
+    for(let k = 0; k <= segs; k++){
+      const t = k / segs;
+      const taper = Math.sin(t * Math.PI);
+      curvePts.push(p.clone().lerp(q, t).addScaledVector(bulgeDir, amp * taper));
+    }
+    for(let k = 0; k < segs; k++){
+      const s = curvePts[k], e = curvePts[k + 1];
+      const base = (vBase + k * 4) * 3;
+      for(let v = 0; v < 4; v++){
+        const idx = base + v * 3;
+        startsArr[idx] = s.x; startsArr[idx+1] = s.y; startsArr[idx+2] = s.z;
+        endsArr[idx]   = e.x; endsArr[idx+1]   = e.y; endsArr[idx+2]   = e.z;
+      }
+    }
+  }
+  function updateNodeThreads(nodeIndex, liveLocalPos){
+    const refs = connectionsByNode && connectionsByNode[nodeIndex];
+    if(!threadGeo || !refs || !refs.length) return;
+    const startsArr = threadGeo.attributes.aStart.array;
+    const endsArr = threadGeo.attributes.aEnd.array;
+    refs.forEach(ref => {
+      const otherPos = nodePositions[ref.otherIndex];
+      const p = ref.role === 'p' ? liveLocalPos : otherPos;
+      const q = ref.role === 'p' ? otherPos : liveLocalPos;
+      writeCurveToBuffers(startsArr, endsArr, ref.vBase, p, q, ref.bulgeDir, ref.amp);
+    });
+    threadGeo.attributes.aStart.needsUpdate = true;
+    threadGeo.attributes.aEnd.needsUpdate = true;
+  }
+
+  // ---- camera + grab-to-spin ---------------------------------------
+  // The camera itself just sits on one fixed axis and dollies in/out —
+  // all the "looking around" comes from spinning the sphere (the
+  // `world` group) instead, like grabbing a globe with your hands:
+  // drag it and it turns; let go and it keeps turning, slowly losing
+  // momentum. It never actually comes to a dead stop, though — once
+  // the drag momentum decays down to nothing, a slow idle spin just
+  // picks back up and carries it on indefinitely, so it's always
+  // gently turning whether or not anyone's touching it.
+  const FAR_RADIUS  = 3200; // scroll=0: whole sphere seen as one small, distant form
+  const NEAR_RADIUS = 25;   // scroll=1: camera sits essentially at the center
+  let currentCamRadius = FAR_RADIUS; // mirrored every frame below; read by the click-to-focus feature further down
+
+  function scrollProgress(){
+    const doc = document.documentElement;
+    // the hero section (exactly one viewport tall, at the very top of the
+    // document) shouldn't count toward this — the dive-in should only
+    // start once you've actually scrolled past it into the real content
+    const heroH = window.innerHeight;
+    const scrollable = Math.max(1, doc.scrollHeight - window.innerHeight - heroH);
+    return Math.min(1, Math.max(0, (window.scrollY - heroH) / scrollable));
+  }
+
+  // a trackpad pinch (or literal Ctrl+wheel) always shifts this, so you
+  // can pull back out even sitting at the very bottom of the scroll —
+  // ordinary wheel scrolling (no ctrlKey) is left completely untouched,
+  // so it keeps driving the page/corrosion scroll exactly as before
+  let zoomOffset = 0;
+  const ZOOM_OFFSET_MAX = FAR_RADIUS - NEAR_RADIUS;
+  window.addEventListener('wheel', (e) => {
+    if(!e.ctrlKey) return;
+    if(focusMesh) return; // a focused photo owns the camera distance for the moment
+    e.preventDefault();
+    zoomOffset = Math.max(0, Math.min(ZOOM_OFFSET_MAX, zoomOffset + e.deltaY * 2.2));
+  }, { passive:false });
+
+  const IDLE_SPIN = (Math.PI * 2) / 90; // one slow revolution every 90s, idle-only
+  const DRAG_SPEED = 0.0045;
+  const MOMENTUM_DAMPING = 0.94; // per-frame decay once released
+  const MOMENTUM_FLOOR = 0.00002; // below this (rad/ms) momentum snaps to a stop
+
+  let yaw = 0, pitch = -0.07;     // current spin of the world
+  let velYaw = 0, velPitch = 0;   // rad/ms, used for momentum after release
+  let dragging = false, lastX = 0, lastY = 0, lastMoveT = 0;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if(focusMesh) return; // a focused photo isn't draggable — click it (or the backdrop) to release it first
+    dragging = true;
+    velYaw = 0; velPitch = 0;
+    lastX = e.clientX; lastY = e.clientY;
+    lastMoveT = performance.now();
+    canvas.style.cursor = 'grabbing';
+  });
+  window.addEventListener('pointermove', (e) => {
+    if(!dragging) return;
+    const now = performance.now();
+    const dt = Math.max(1, now - lastMoveT);
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    lastMoveT = now;
+
+    const dYaw = dx * DRAG_SPEED;
+    const dPitch = dy * DRAG_SPEED;
+    yaw += dYaw;
+    pitch += dPitch;
+    // velocity carried into momentum once the pointer lifts
+    velYaw = dYaw / dt;
+    velPitch = dPitch / dt;
+  });
+  window.addEventListener('pointerup', (e) => {
+    dragging = false;
+    updateHoverCursor(e.clientX, e.clientY);
+  });
+  canvas.style.cursor = 'grab';
+
+  let lastFrameT = performance.now();
+  function animate(now){
+    const prog = scrollProgress();
+    const camRadius = Math.max(NEAR_RADIUS, Math.min(FAR_RADIUS,
+      FAR_RADIUS + (NEAR_RADIUS - FAR_RADIUS) * prog + zoomOffset
+    ));
+    camera.position.set(0, 0, camRadius);
+    camera.lookAt(0, 0, 0);
+    currentCamRadius = camRadius;
+
+    if(threadMaterial){
+      threadMaterial.uniforms.uThickness.value =
+        THREAD_THICKNESS_FAR_PX + (THREAD_THICKNESS_NEAR_PX - THREAD_THICKNESS_FAR_PX) * prog;
+    }
+
+    const dt = Math.min(48, now - lastFrameT); // clamp so a stall can't fling it
+    lastFrameT = now;
+
+    // a focused photo freezes the sphere's spin entirely — grabbed
+    // in place, mid-turn, until it's released — rather than fighting the
+    // pulled-out photo's own position/orientation math every frame
+    if(!focusMesh){
+      if(dragging){
+        // position itself is already updated directly in pointermove
+      } else if(Math.abs(velYaw) > MOMENTUM_FLOOR || Math.abs(velPitch) > MOMENTUM_FLOOR){
+        yaw += velYaw * dt;
+        pitch += velPitch * dt;
+        velYaw *= MOMENTUM_DAMPING;
+        velPitch *= MOMENTUM_DAMPING;
+      } else {
+        // momentum has fully decayed — rather than sitting dead still,
+        // ease into the slow idle spin so it's always gently turning
+        velYaw = 0; velPitch = 0;
+        yaw += IDLE_SPIN * (dt / 1000);
+      }
+      world.rotation.set(pitch, yaw, 0);
+    }
+
+    tickFocus(now);
+    tickHold(now);
+    tickDissolveParticles(now);
+    tickTravelSparks(now);
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    if(threadMaterial) threadMaterial.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+  });
+
+  // ---- click a photo to pull it to center ------------------------------
+  // The clicked photo leaves the spinning `world` group entirely —
+  // reparented onto `scene` itself via THREE's attach(), which preserves
+  // its current on-screen transform exactly, so nothing jumps at the
+  // moment of the click — and animates to a fixed spot in front of the
+  // (now frozen) camera. Its threads stay plugged in the whole time:
+  // updateNodeThreads() keeps re-stretching them toward wherever the
+  // photo currently sits, every frame, so the connection to the rest of
+  // the web is never lost, only pulled taut. No caption, no text — just
+  // the photo itself, its own corrosion treatment deepening as it
+  // approaches center and blooming into color in the final stretch.
+  const FOCUS_DURATION = 820;          // ms, one-way
+  const FOCUS_SCREEN_FRACTION = 0.58;  // ~58% of viewport height once centered
+
+  let focusMesh = null, focusIndex = -1;
+  let focusProgress = 0, focusAnimFrom = 0, focusAnimTarget = 0, focusAnimStart = 0, focusAnimating = false;
+  let focusWorldInverse = null; // world's (frozen, while focused) inverse matrix — projects the live scene-space position back into the thread geometry's local space
+  let focusOrigin = null, focusOriginQuat = null, focusOriginScale = null, focusTargetPos = null, focusTargetScale = null;
+
+  function easeInOutCubic(t){
+    return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+  }
+  function lockScroll(){
+    document.documentElement.style.overflow = 'hidden';
+    document.body.style.overflow = 'hidden';
+  }
+  function unlockScroll(){
+    document.documentElement.style.overflow = '';
+    document.body.style.overflow = '';
+  }
+
+  function ensureFocusCanvas(mesh){
+    if(mesh.userData.focusTex) return;
+    const photoImg = mesh.userData.photoImg;
+    if(!photoImg) return;
+    const w = photoImg.naturalWidth || photoImg.width;
+    const h = photoImg.naturalHeight || photoImg.height;
+    const fc = document.createElement('canvas');
+    fc.width = w; fc.height = h;
+    const tex = new THREE.CanvasTexture(fc);
+    tex.encoding = THREE.sRGBEncoding;
+    mesh.userData.focusCanvas = fc;
+    mesh.userData.focusCtx = fc.getContext('2d');
+    mesh.userData.focusTex = tex;
+  }
+  function redrawFocusCanvas(mesh, progress){
+    const { focusCtx: ctx, focusCanvas: fc, focusTex: tex, photoImg, overlayImg, overlayParams } = mesh.userData;
+    if(!ctx) return;
+    drawPhotoFrame(ctx, fc.width, fc.height, photoImg, overlayImg, overlayParams, progress);
+    tex.needsUpdate = true;
+  }
+  function disposeFocusCanvas(mesh){
+    if(mesh.userData.focusTex) mesh.userData.focusTex.dispose();
+    mesh.userData.focusTex = null;
+    mesh.userData.focusCanvas = null;
+    mesh.userData.focusCtx = null;
+  }
+
+  const raycaster = new THREE.Raycaster();
+  const pointerNDC = new THREE.Vector2();
+  const CLICK_MAX_MOVE = 6; // px of movement allowed before a RELEASE reads as a drag instead of a quick click — fine for that, since a real click is over in well under a second
+  const HOLD_MAX_DRIFT = 26; // px of movement allowed DURING an in-progress hold before it cancels as a drag — a hold runs 1-1.7s+, and no real hand (mouse, trackpad, or finger) stays within 6px for that whole span, so reusing CLICK_MAX_MOVE here was silently canceling and restarting the charge on ordinary hand tremor, before it could ever finish
+
+  // ---------- hold-to-dissolve ----------
+  // press and hold a photo: its own corrosion overlay accelerates (reusing
+  // the exact same darken+color-bloom progression as click-to-focus, via
+  // ensureFocusCanvas/redrawFocusCanvas on the mesh's regular, in-sphere
+  // material — no need for it to be pulled to center first), and once held
+  // long enough it dissolves into a drifting particle cloud sampled from
+  // its own (already color-shifted) pixels. Its thread connections are
+  // untouched by any of this — they're built from the node's fixed base
+  // position, which never moves here, so they simply keep pointing at
+  // where the photo used to be the whole time it's gone. The photo's own
+  // image reappears immediately as a small color-shifted stamp on a random
+  // other photo, then the original spot slowly regrows on its own after a
+  // cooldown.
+  const HOLD_CHARGE_DELAY = 600;            // ms of holding before it visibly starts charging — below this always reads as a plain click, however long the click itself took
+  const HOLD_DISSOLVE_AT = 1700;            // ms of total hold before it fully dissolves
+  const HOLD_FADE_DOWN = 250;               // ms spent fading an already-focused (fully bloomed) photo back down to faint before it climbs again — so the whole faint->darker->color-shift arc is visible during the hold instead of starting from a look that's already maxed out
+  const DISSOLVE_REGROW_DELAY = 14000;      // ms the spot stays empty before regrowing
+  const DISSOLVE_REGROW_DURATION = 2600;    // ms for the regrow fade/scale-in itself
+  const DISSOLVE_GRID = 18;                 // cols/rows of particles sampled from the photo
+  const DISSOLVE_LIFETIME = 1600;           // ms the particle burst itself lasts
+
+  let holdCandidate = null; // { mesh, startX, startY, t }
+  let lastPointerX = 0, lastPointerY = 0;
+  let activeDissolves = [];
+  let activeTravels = [];
+
+  window.addEventListener('pointermove', (e) => { lastPointerX = e.clientX; lastPointerY = e.clientY; });
+
+  function revertCharge(mesh){
+    mesh.userData.dissolveState = undefined;
+    if(mesh.userData.holdWasFocused){
+      // this canvas belongs to a focus session that's still open — it's
+      // not hold's to swap or dispose, just settle back to the normal
+      // fully-focused look
+      mesh.userData.holdWasFocused = false;
+      if(mesh.userData.focusTex) redrawFocusCanvas(mesh, 1);
+      return;
+    }
+    if(mesh.userData.bakedMapBeforeHold){
+      mesh.material.map = mesh.userData.bakedMapBeforeHold;
+      mesh.material.needsUpdate = true;
+      mesh.userData.bakedMapBeforeHold = null;
+    }
+    disposeFocusCanvas(mesh);
+  }
+
+  function cancelHold(){
+    if(!holdCandidate) return;
+    const { mesh } = holdCandidate;
+    holdCandidate = null;
+    if(mesh.userData.dissolveState === 'charging') revertCharge(mesh);
+  }
+
+  function spawnDissolveParticles(mesh){
+    // sample the photo's OWN original colors, not the charge-darkened
+    // canvas — the darkened look reads fine as a flat overlay on the
+    // plane, but as scattered points against the busy thread/photo
+    // backdrop it's too dark and muted to read as "particles" at all
+    const srcImg = mesh.userData.photoImg || mesh.userData.focusCanvas || mesh.userData.bakedCanvas;
+    if(!srcImg) return;
+    const cols = DISSOLVE_GRID, rows = DISSOLVE_GRID;
+    const sampleCanvas = document.createElement('canvas');
+    sampleCanvas.width = cols; sampleCanvas.height = rows;
+    const sctx = sampleCanvas.getContext('2d');
+    sctx.drawImage(srcImg, 0, 0, cols, rows);
+    const data = sctx.getImageData(0, 0, cols, rows).data;
+
+    const count = cols * rows;
+    const positions = new Float32Array(count * 3);
+    const velocities = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    const outward = mesh.position.clone().normalize(); // mesh is a direct child of `world`, same basis as nodePositions
+    // velocities are scaled to the photo's own size (nodeBaseSize varies
+    // ~60-150 world units across photos, and the sphere itself spans
+    // hundreds of units) — a fixed small constant here would either be
+    // imperceptible on a large photo or wildly overshoot a small one
+    const sizeScale = Math.max(mesh.scale.x, mesh.scale.y);
+
+    let p = 0;
+    for(let ry = 0; ry < rows; ry++){
+      for(let cx = 0; cx < cols; cx++){
+        const u = (cx + 0.5) / cols, v = (ry + 0.5) / rows;
+        const lx = (u - 0.5) * mesh.scale.x;
+        const ly = (0.5 - v) * mesh.scale.y; // image v grows downward, plane +Y grows upward
+        positions[p*3+0] = mesh.position.x + lx;
+        positions[p*3+1] = mesh.position.y + ly;
+        positions[p*3+2] = mesh.position.z;
+
+        const jx = (Math.random()*2-1), jy = (Math.random()*2-1), jz = (Math.random()*2-1);
+        const speed = sizeScale * (0.006 + Math.random() * 0.012);
+        const jitter = sizeScale * 0.004;
+        velocities[p*3+0] = outward.x * speed + jx * jitter;
+        velocities[p*3+1] = outward.y * speed + jy * jitter + sizeScale * 0.004; // gentle upward smoke drift
+        velocities[p*3+2] = outward.z * speed + jz * jitter;
+
+        const di = (ry * cols + cx) * 4;
+        // a mild brightness lift — a dissolving ember/dust mote reads
+        // better a touch brighter than the flat source pixel, especially
+        // against the dark, busy thread network behind it
+        colors[p*3+0] = Math.min(1, (data[di]   / 255) * 1.25 + 0.05);
+        colors[p*3+1] = Math.min(1, (data[di+1] / 255) * 1.25 + 0.05);
+        colors[p*3+2] = Math.min(1, (data[di+2] / 255) * 1.25 + 0.05);
+        p++;
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    // fixed pixel size (sizeAttenuation:false), not a world-space size —
+    // the camera's distance to the sphere varies hugely with scroll
+    // (NEAR_RADIUS 25 to FAR_RADIUS 3200), and a world-space dot sized
+    // relative to the photo itself would shrink to sub-pixel and vanish
+    // whenever the view is zoomed out
+    const baseSize = 9;
+    const mat = new THREE.PointsMaterial({
+      size: baseSize,
+      vertexColors: true,
+      transparent: true,
+      opacity: 1,
+      depthWrite: false,
+      sizeAttenuation: false,
+    });
+    const points = new THREE.Points(geo, mat);
+    world.add(points); // same rotating frame the photo itself lived in
+
+    activeDissolves.push({ points, geo, mat, velocities, startT: performance.now(), baseSize, sizeScale });
+  }
+
+  function tickDissolveParticles(now){
+    if(!activeDissolves.length) return;
+    activeDissolves = activeDissolves.filter((d) => {
+      const t = (now - d.startT) / DISSOLVE_LIFETIME;
+      if(t >= 1){
+        world.remove(d.points);
+        d.geo.dispose();
+        d.mat.dispose();
+        return false;
+      }
+      const arr = d.geo.attributes.position.array;
+      const lift = d.sizeScale * 0.00025; // slight upward acceleration — rising smoke
+      for(let i = 0; i < arr.length; i += 3){
+        arr[i]   += d.velocities[i];
+        arr[i+1] += d.velocities[i+1];
+        arr[i+2] += d.velocities[i+2];
+        d.velocities[i+1] += lift;
+      }
+      d.geo.attributes.position.needsUpdate = true;
+      d.mat.opacity = Math.max(0, Math.pow(1 - t, 0.6)); // stays visible longer, then drops off near the end
+      d.mat.size = d.baseSize * (1 + t * 1.1); // particles expand as they dissipate, more subtly than before
+      return true;
+    });
+  }
+
+  // a small comet-stream of the dissolving photo's own sampled colors,
+  // launched the instant a dissolve triggers and arriving right as the
+  // stamp (see stampImageOnto, STAMP_FADE_MS) finishes fading onto the
+  // target photo — without this, particles just scatter in place and there
+  // is no visible answer to "where did it go", which was the main complaint
+  const TRAVEL_DURATION = 900; // matches STAMP_FADE_MS so arrival lines up with the stamp appearing
+  const TRAVEL_COUNT = 30;
+
+  function spawnTravelSparks(mesh, targetMesh){
+    const srcImg = mesh.userData.photoImg || mesh.userData.focusCanvas || mesh.userData.bakedCanvas;
+    const start = mesh.position.clone();
+    const end = targetMesh.position.clone();
+    const count = TRAVEL_COUNT;
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    const startOffsets = new Float32Array(count * 3); // scatter around the source photo at launch
+    const delays = new Float32Array(count);            // staggered launch so it reads as a stream, not one lockstep clump
+
+    let sampleData = null;
+    if(srcImg){
+      const sc = document.createElement('canvas');
+      sc.width = 6; sc.height = 6;
+      sc.getContext('2d').drawImage(srcImg, 0, 0, 6, 6);
+      sampleData = sc.getContext('2d').getImageData(0, 0, 6, 6).data;
+    }
+
+    const sizeScale = Math.max(mesh.scale.x, mesh.scale.y, 1);
+    for(let i = 0; i < count; i++){
+      const ox = (Math.random()*2-1) * sizeScale * 0.35;
+      const oy = (Math.random()*2-1) * sizeScale * 0.35;
+      const oz = (Math.random()*2-1) * sizeScale * 0.08;
+      startOffsets[i*3+0] = ox; startOffsets[i*3+1] = oy; startOffsets[i*3+2] = oz;
+      delays[i] = Math.random() * 0.3;
+      positions[i*3+0] = start.x + ox;
+      positions[i*3+1] = start.y + oy;
+      positions[i*3+2] = start.z + oz;
+      if(sampleData){
+        const px = Math.floor(Math.random()*6), py = Math.floor(Math.random()*6);
+        const di = (py*6+px)*4;
+        colors[i*3+0] = Math.min(1, (sampleData[di]   / 255) * 1.3 + 0.1);
+        colors[i*3+1] = Math.min(1, (sampleData[di+1] / 255) * 1.3 + 0.1);
+        colors[i*3+2] = Math.min(1, (sampleData[di+2] / 255) * 1.3 + 0.1);
+      } else {
+        colors[i*3+0] = 0.85; colors[i*3+1] = 0.5; colors[i*3+2] = 0.3;
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const mat = new THREE.PointsMaterial({
+      size: 8,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      sizeAttenuation: false,
+    });
+    const points = new THREE.Points(geo, mat);
+    world.add(points); // same rotating frame both photos live in
+
+    activeTravels.push({ points, geo, mat, start, end, startOffsets, delays, startT: performance.now() });
+  }
+
+  function tickTravelSparks(now){
+    if(!activeTravels.length) return;
+    activeTravels = activeTravels.filter((d) => {
+      const t = (now - d.startT) / TRAVEL_DURATION;
+      if(t >= 1){
+        world.remove(d.points);
+        d.geo.dispose();
+        d.mat.dispose();
+        return false;
+      }
+      const arr = d.geo.attributes.position.array;
+      const dx = d.end.x - d.start.x, dy = d.end.y - d.start.y, dz = d.end.z - d.start.z;
+      const n = d.startOffsets.length / 3;
+      for(let i = 0; i < n; i++){
+        const localT = Math.max(0, Math.min(1, (t - d.delays[i]) / (1 - d.delays[i])));
+        const ease = localT * localT * (3 - 2 * localT); // smoothstep
+        arr[i*3+0] = d.start.x + d.startOffsets[i*3+0] * (1 - ease) + dx * ease;
+        arr[i*3+1] = d.start.y + d.startOffsets[i*3+1] * (1 - ease) + dy * ease;
+        arr[i*3+2] = d.start.z + d.startOffsets[i*3+2] * (1 - ease) + dz * ease;
+      }
+      d.geo.attributes.position.needsUpdate = true;
+      // fades in fast at launch, cruises bright, fades out just before
+      // arrival so it doesn't visibly "pop" into the target photo
+      d.mat.opacity = Math.min(1, t * 6) * Math.min(1, (1 - t) * 4);
+      return true;
+    });
+  }
+
+  function startRegrow(mesh){
+    if(mesh.userData.dissolveState !== 'gone') return; // defensive — state already moved on somehow
+    mesh.userData.dissolveState = 'regrowing';
+    if(mesh.userData.bakedTex){
+      mesh.material.map = mesh.userData.bakedTex; // carries any stamps received while it was gone
+      mesh.material.needsUpdate = true;
+    }
+    mesh.visible = true;
+    mesh.material.transparent = true;
+    mesh.material.needsUpdate = true;
+    mesh.material.opacity = 0;
+    mesh.scale.set(0.001, 0.001, 1);
+    const fullX = mesh.userData.fullScaleX, fullY = mesh.userData.fullScaleY;
+    const startT = performance.now();
+    (function anim(){
+      const t = Math.min(1, (performance.now() - startT) / DISSOLVE_REGROW_DURATION);
+      const eased = easeInOutCubic(t);
+      mesh.scale.set(fullX * eased, fullY * eased, 1);
+      mesh.material.opacity = eased;
+      if(t < 1){
+        requestAnimationFrame(anim);
+      } else {
+        mesh.material.transparent = false;
+        mesh.material.opacity = 1;
+        mesh.material.needsUpdate = true;
+        mesh.userData.dissolveState = undefined;
+      }
+    })();
+  }
+
+  // when the photo dissolving is the one currently pulled to center, the
+  // focus session has nothing left to show — end it the same way a normal
+  // close would (thread back at rest, scroll unlocked, mesh back in the
+  // `world` group at its own sphere position — matching exactly what
+  // spawnDissolveParticles and the later regrow both assume), just without
+  // the close-animation tween, since there's no photo left to animate
+  function releaseFocusOnDissolve(mesh, i){
+    world.attach(mesh);
+    mesh.position.copy(nodePositions[i]);
+    if(focusOriginQuat) mesh.quaternion.copy(focusOriginQuat);
+    if(focusOriginScale) mesh.scale.copy(focusOriginScale);
+    updateNodeThreads(i, nodePositions[i]);
+    unlockScroll();
+    focusMesh = null;
+    focusIndex = -1;
+    focusWorldInverse = null;
+    focusAnimating = false;
+    focusProgress = 0;
+  }
+
+  function triggerDissolve(mesh){
+    if(mesh.userData.dissolveState === 'gone') return;
+    mesh.userData.dissolveState = 'gone';
+    holdCandidate = null;
+
+    const target = pickRandomOtherMesh(mesh.userData.index);
+    if(target && mesh.userData.photoImg) stampImageOnto(target, mesh.userData.photoImg);
+
+    // reparent back to the sphere (if it was focused) BEFORE spawning the
+    // particle burst — spawnDissolveParticles reads mesh.position/scale
+    // assuming `world`-local sphere coordinates
+    if(mesh === focusMesh) releaseFocusOnDissolve(mesh, mesh.userData.index);
+
+    spawnDissolveParticles(mesh);
+    if(target) spawnTravelSparks(mesh, target);
+
+    mesh.visible = false;
+    disposeFocusCanvas(mesh);
+    mesh.userData.bakedMapBeforeHold = null;
+    mesh.userData.holdWasFocused = false;
+
+    setTimeout(() => startRegrow(mesh), DISSOLVE_REGROW_DELAY);
+  }
+
+  function tickHold(now){
+    if(!holdCandidate) return;
+    const { mesh, startX, startY, t } = holdCandidate;
+    const dist = Math.hypot(lastPointerX - startX, lastPointerY - startY);
+    if(dist > HOLD_MAX_DRIFT){ cancelHold(); return; } // turned into a genuine drag, not just hand tremor over a long hold
+    if(mesh.userData.dissolveState === 'gone' || mesh.userData.dissolveState === 'regrowing'){
+      cancelHold();
+      return;
+    }
+    const elapsed = now - t;
+    if(elapsed < HOLD_CHARGE_DELAY) return; // still plain click territory, no visual yet
+
+    const isFocused = (mesh === focusMesh);
+
+    if(mesh.userData.dissolveState !== 'charging'){
+      mesh.userData.dissolveState = 'charging';
+      mesh.userData.holdWasFocused = isFocused;
+      if(!isFocused){
+        ensureFocusCanvas(mesh);
+        if(mesh.userData.focusTex){
+          mesh.userData.bakedMapBeforeHold = mesh.material.map;
+          mesh.material.map = mesh.userData.focusTex;
+          mesh.material.needsUpdate = true;
+        }
+      }
+      // if isFocused, the open focus session already owns focusTex/
+      // focusCanvas and material.map already points at it — nothing to
+      // swap, redrawFocusCanvas below just keeps drawing onto it
+    }
+
+    const sinceCharge = elapsed - HOLD_CHARGE_DELAY;
+    let progress, climbing;
+    if(isFocused){
+      // an already-focused photo is sitting at drawPhotoFrame's own
+      // progress=1 (its fully-bloomed resting look) — holding it visibly
+      // fades that back down to faint first, then climbs back up through
+      // the exact same intensify/color-shift arc toward dissolving, so
+      // the full faint -> darker -> color-shift -> gone sequence actually
+      // plays out instead of starting from a look that's already maxed
+      if(sinceCharge < HOLD_FADE_DOWN){
+        progress = 1 - (sinceCharge / HOLD_FADE_DOWN);
+        climbing = false;
+      } else {
+        const climbDur = HOLD_DISSOLVE_AT - HOLD_CHARGE_DELAY - HOLD_FADE_DOWN;
+        progress = Math.min(1, (sinceCharge - HOLD_FADE_DOWN) / climbDur);
+        climbing = true;
+      }
+    } else {
+      progress = Math.min(1, sinceCharge / (HOLD_DISSOLVE_AT - HOLD_CHARGE_DELAY));
+      climbing = true;
+    }
+    redrawFocusCanvas(mesh, progress);
+    if(climbing && progress >= 1) triggerDissolve(mesh);
+  }
+
+  function openFocus(i){
+    if(focusMesh) return;
+    const mesh = meshes[i];
+    if(!mesh || !mesh.userData.photoImg) return;
+
+    focusIndex = i;
+    focusMesh = mesh;
+
+    world.updateMatrixWorld(true);
+    focusWorldInverse = new THREE.Matrix4().copy(world.matrixWorld).invert();
+
+    scene.attach(mesh); // reparents onto the scene root, preserving its current on-screen transform exactly
+
+    focusOrigin = mesh.position.clone();
+    focusOriginQuat = mesh.quaternion.clone(); // the true original — kept only to restore exactly on close
+    focusOriginScale = mesh.scale.clone();
+
+    // face the camera head-on right away, before the very first frame of
+    // the transition ever renders — not animated, so there's no visible
+    // "spin", it's simply already front-facing as it starts moving forward
+    mesh.quaternion.identity();
+
+    const targetDist = Math.max(60, Math.min(currentCamRadius * 0.55, 420));
+    focusTargetPos = new THREE.Vector3(0, 0, currentCamRadius - targetDist);
+
+    const fovRad = camera.fov * Math.PI / 180;
+    const visibleHeight = 2 * Math.tan(fovRad / 2) * targetDist;
+    const desiredH = visibleHeight * FOCUS_SCREEN_FRACTION;
+    const aspect = focusOriginScale.x / focusOriginScale.y;
+    focusTargetScale = new THREE.Vector3(desiredH * aspect, desiredH, 1);
+
+    ensureFocusCanvas(mesh);
+    mesh.userData.bakedMap = mesh.material.map;
+    if(mesh.userData.focusTex){
+      mesh.material.map = mesh.userData.focusTex;
+      mesh.material.needsUpdate = true;
+      redrawFocusCanvas(mesh, 0);
+    }
+
+    lockScroll();
+    animateFocus(1);
+  }
+
+  function closeFocus(){
+    if(!focusMesh || focusAnimTarget === 0) return;
+    animateFocus(0);
+  }
+
+  function animateFocus(target){
+    focusAnimFrom = focusProgress;
+    focusAnimTarget = target;
+    focusAnimStart = performance.now();
+    focusAnimating = true;
+  }
+
+  function applyFocusProgress(p){
+    const mesh = focusMesh;
+    if(!mesh) return;
+
+    mesh.position.lerpVectors(focusOrigin, focusTargetPos, p);
+    mesh.scale.lerpVectors(focusOriginScale, focusTargetScale, p);
+    // orientation is left exactly as it was — no reorientation/"spin" as
+    // it approaches, only a straight move-and-scale toward the viewer
+    const liveLocalPos = mesh.position.clone().applyMatrix4(focusWorldInverse);
+    updateNodeThreads(focusIndex, liveLocalPos);
+
+    if(mesh.userData.focusTex) redrawFocusCanvas(mesh, p);
+  }
+
+  function finishCloseFocus(){
+    const mesh = focusMesh, i = focusIndex;
+    mesh.position.copy(focusOrigin);
+    mesh.quaternion.copy(focusOriginQuat);
+    mesh.scale.copy(focusOriginScale);
+    world.attach(mesh); // back into the spinning group — local transform restored to match nodePositions[i] exactly
+
+    updateNodeThreads(i, nodePositions[i]);
+    if(mesh.userData.bakedMap){
+      mesh.material.map = mesh.userData.bakedMap;
+      mesh.material.needsUpdate = true;
+    }
+    disposeFocusCanvas(mesh);
+    unlockScroll();
+
+    focusMesh = null;
+    focusIndex = -1;
+    focusWorldInverse = null;
+  }
+
+  function tickFocus(now){
+    if(!focusAnimating) return;
+    const t = Math.min(1, (now - focusAnimStart) / FOCUS_DURATION);
+    const eased = easeInOutCubic(t);
+    focusProgress = focusAnimFrom + (focusAnimTarget - focusAnimFrom) * eased;
+    applyFocusProgress(focusProgress);
+    if(t >= 1){
+      focusAnimating = false;
+      if(focusAnimTarget === 0) finishCloseFocus();
+    }
+  }
+
+  let clickStart = null;
+
+  function raycastMesh(clientX, clientY){
+    const rect = canvas.getBoundingClientRect();
+    pointerNDC.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNDC.y = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    raycaster.setFromCamera(pointerNDC, camera);
+    const hits = raycaster.intersectObjects(meshes, false);
+    return hits.length ? hits[0].object : null;
+  }
+
+  // the only feedback a mouse user gets, before ever pressing down, that a
+  // photo is something they can click (to open) or hold (to dissolve) — a
+  // hand cursor exactly over a live mesh, same hero-banner exclusion as the
+  // pointerdown handler below so the ray never "sees" sphere photos sitting
+  // behind the still-opaque hero intro
+  function updateHoverCursor(clientX, clientY){
+    if(dragging){ canvas.style.cursor = 'grabbing'; return; }
+    const topEl = document.elementFromPoint(clientX, clientY);
+    if(topEl && topEl.closest && (topEl.closest('#hero') || topEl.closest('#bgm-toggle'))){
+      canvas.style.cursor = focusMesh ? 'default' : 'grab';
+      return;
+    }
+    const hit = raycastMesh(clientX, clientY);
+    const interactive = hit && !hit.userData.dissolveState && (!focusMesh || hit === focusMesh);
+    canvas.style.cursor = interactive ? 'pointer' : (focusMesh ? 'default' : 'grab');
+  }
+  window.addEventListener('pointermove', (e) => {
+    updateHoverCursor(e.clientX, e.clientY);
+  }, { passive:true });
+
+  // listening on `window`, not just the canvas: #page-wrap's text column
+  // (.content) sits ON TOP of the canvas with pointer-events:auto (so it
+  // stays selectable — see the comment on #page-wrap above), which covers
+  // a good chunk of screen-center at every scroll depth, INCLUDING exactly
+  // where a focused photo always sits once pulled to center. A listener
+  // scoped to the canvas element itself never even sees a press that
+  // landed on that overlapping text column, so clicking or holding
+  // anywhere near the middle of the screen could silently do nothing.
+  // Raycasting purely from clientX/clientY (not from e.target) sidesteps
+  // that entirely — it doesn't matter which DOM element the browser
+  // decided "received" the press, only where the ray actually lands.
+  window.addEventListener('pointerdown', (e) => {
+    // the one place this SHOULD stay inert: the hero banner's own opaque
+    // intro scene, genuinely on top for the first couple of viewports.
+    // The photo sphere can still be inside the camera frustum behind it
+    // (it's just a different scene on the same shared camera), so without
+    // this check a press on the hero title could raycast-hit a sphere
+    // photo nobody can actually see yet.
+    const topEl = document.elementFromPoint(e.clientX, e.clientY);
+    if(topEl && topEl.closest && (topEl.closest('#hero') || topEl.closest('#bgm-toggle'))) return;
+
+    clickStart = { x: e.clientX, y: e.clientY, t: performance.now() };
+    if(focusAnimating) return;
+    const hit = raycastMesh(e.clientX, e.clientY);
+    if(!hit || hit.userData.dissolveState) return;
+    // while a photo is focused (pulled to center), only holding THAT SAME
+    // photo can charge a dissolve — pressing elsewhere is left alone, so
+    // pointerup's existing "any clean click away closes focus" still runs
+    if(focusMesh && hit !== focusMesh) return;
+    holdCandidate = { mesh: hit, startX: e.clientX, startY: e.clientY, t: performance.now() };
+  });
+  window.addEventListener('pointerup', (e) => {
+    // was this release ending a hold that had ALREADY started visibly
+    // charging (past HOLD_CHARGE_DELAY)? capture that before cancelHold()
+    // reverts the charge and clears holdCandidate — an ordinary click,
+    // however long the click itself happened to take, should still open
+    // the photo; only a hold that visibly began corroding should not
+    const wasCharging = !!(holdCandidate && holdCandidate.mesh.userData.dissolveState === 'charging');
+    cancelHold();
+    if(!clickStart) return;
+    const dx = e.clientX - clickStart.x, dy = e.clientY - clickStart.y;
+    const dist = Math.hypot(dx, dy);
+    clickStart = null;
+    if(dist > CLICK_MAX_MOVE) return; // was a drag, not a click
+    if(wasCharging) return; // a deliberate hold that was released early — already reverted above, not a click
+    if(focusAnimating) return;
+
+    if(focusMesh){
+      closeFocus(); // any clean click while a photo is focused releases it
+      updateHoverCursor(e.clientX, e.clientY);
+      return;
+    }
+    const hit = raycastMesh(e.clientX, e.clientY);
+    if(hit && !hit.userData.dissolveState) openFocus(hit.userData.index);
+    updateHoverCursor(e.clientX, e.clientY);
+  });
+  window.addEventListener('keydown', (e) => {
+    // don't let Escape yank the focus session closed out from under an
+    // actively-charging hold on that same photo — releasing the hold (or
+    // letting it finish dissolving) settles it first
+    if(e.key === 'Escape' && focusMesh && !focusAnimating && !(holdCandidate && holdCandidate.mesh === focusMesh)) closeFocus();
+  });
+})();
+
+// ===================================================================
+// Corrosion-mask reveal — the WHITE PAGE SURFACE corrodes open as you
+// scroll, letting the (always-running) image network show through the
+// growing holes. The paragraphs themselves never change — only the
+// backdrop behind/around them.
+//
+// Performance approach: instead of redrawing pixels every scroll frame,
+// a small set of tileable corrosion-pattern frames is pre-rendered ONCE
+// at load (cheap canvas work, done off the scroll path), each one a bit
+// more "eaten through" than the last. Scrolling only swaps which
+// pre-built frame is shown, and only when you've crossed into the next
+// frame's range — so the per-scroll-event cost is a couple of cheap
+// comparisons, not a pixel loop.
+// ===================================================================
+(function(){
+  const pageWrap = document.getElementById('page-wrap');
+  const corrosionBg = document.getElementById('corrosion-bg');
+  const TILE_PX   = 720;
+  const TILE_RES  = 280;
+  const FRAMES    = 22;
+  const EDGE_BAND = 0.045;
+
+  // rust bloom: white paper -> pale warm blush -> burnt orange -> deep
+  // rust red-brown -> near-black, right at the rim before it opens through
+  const RUST_STOPS = [
+    { pos:0.00, rgb:[255,255,255] },
+    { pos:0.22, rgb:[255,214,168] },
+    { pos:0.50, rgb:[198,92,42]   },
+    { pos:0.80, rgb:[122,36,24]   },
+    { pos:1.00, rgb:[60,18,14]    }
+  ];
+  function rustColor(bandPos){
+    for(let i=0;i<RUST_STOPS.length-1;i++){
+      const a = RUST_STOPS[i], b = RUST_STOPS[i+1];
+      if(bandPos <= b.pos){
+        const f = (bandPos - a.pos) / (b.pos - a.pos || 1);
+        return [
+          a.rgb[0] + (b.rgb[0]-a.rgb[0])*f,
+          a.rgb[1] + (b.rgb[1]-a.rgb[1])*f,
+          a.rgb[2] + (b.rgb[2]-a.rgb[2])*f
+        ];
+      }
+    }
+    return RUST_STOPS[RUST_STOPS.length-1].rgb;
+  }
+
+  function makeGrid(cells){
+    const g = new Float32Array(cells*cells);
+    for(let i=0;i<g.length;i++) g[i] = Math.random();
+    return g;
+  }
+  function sampleGrid(g, cells, u, v){
+    const x = u*cells, y = v*cells;
+    const x0 = Math.floor(x), y0 = Math.floor(y);
+    const fx = x-x0, fy = y-y0;
+    const xi0 = ((x0%cells)+cells)%cells, yi0 = ((y0%cells)+cells)%cells;
+    const xi1 = (xi0+1)%cells, yi1 = (yi0+1)%cells;
+    const gv = (xx,yy)=> g[yy*cells+xx];
+    const top = gv(xi0,yi0)*(1-fx) + gv(xi1,yi0)*fx;
+    const bot = gv(xi0,yi1)*(1-fx) + gv(xi1,yi1)*fx;
+    return top*(1-fy) + bot*fy;
+  }
+
+  // field/dither/colorNoise/sweepHigh/sweepLow are filled in by buildTiles()
+  // below, then kept here (rather than staying local to it) so the idle
+  // crawl can later render extra one-off frames at an arbitrary in-between
+  // threshold — not just the 22 precomputed ones — using the exact same
+  // noise field and coloring rules.
+  let field = null, dither = null, colorNoise = null, sweepHigh = 0, sweepLow = 0;
+
+  // renders one corrosion frame at an arbitrary threshold (not necessarily
+  // one of the 22 precomputed stops) against the shared noise field —
+  // the same per-pixel rule buildTiles() sweeps across all 22 frames,
+  // factored out so the idle crawl can call it for a single in-between
+  // frame without rebuilding the whole set.
+  function renderCorrosionFrame(threshold, forceFullyOpen){
+    const canvas = document.createElement('canvas');
+    canvas.width = TILE_RES; canvas.height = TILE_RES;
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(TILE_RES, TILE_RES);
+    const state = new Uint8Array(TILE_RES*TILE_RES);
+    for(let i=0;i<TILE_RES*TILE_RES;i++){
+      let r=255, g=255, b=255, alpha;
+      if(forceFullyOpen){
+        alpha = 0;
+        state[i] = 0;
+      } else{
+        const n = field[i];
+        if(n > threshold + EDGE_BAND){
+          alpha = 0; // fully open — the hole itself stays clean/transparent
+          state[i] = 0;
+        } else if(n < threshold - EDGE_BAND){
+          alpha = 255; // untouched white paper, well away from any edge
+          state[i] = 2;
+        } else{
+          state[i] = 1; // active frontier, whichever way the dither below falls
+          const bandPos = (n - (threshold-EDGE_BAND)) / (EDGE_BAND*2); // 0..1
+          if(dither[i] < bandPos){
+            alpha = 0;
+          } else {
+            alpha = 255;
+            const jitter = 0.85 + colorNoise[i]*0.3;
+            const c = rustColor(bandPos);
+            r = Math.min(255, c[0]*jitter);
+            g = Math.min(255, c[1]*jitter);
+            b = Math.min(255, c[2]*jitter);
+          }
+        }
+      }
+      const o = i*4;
+      imgData.data[o]=r; imgData.data[o+1]=g; imgData.data[o+2]=b; imgData.data[o+3]=alpha;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return { url: canvas.toDataURL('image/png'), state };
+  }
+
+  // maps a 0..1 sweep position to the same threshold buildTiles() uses for
+  // its discrete frames — shared so a one-off in-between frame lines up
+  // exactly with where the 22 precomputed frames sit on the same sweep
+  function thresholdAt(t){
+    return sweepHigh - t*(sweepHigh - sweepLow);
+  }
+
+  function buildTiles(){
+    // four octaves at non-aligned cell counts (4, 9, 19, 37 — no shared
+    // factors) so their blob shapes never line up into a regular lattice;
+    // this is what made the holes look "too even" before — only two
+    // octaves, both landing on a simple repeating grid feel
+    const OCTAVES = [
+      { cells:4,  weight:0.40 },
+      { cells:9,  weight:0.27 },
+      { cells:19, weight:0.19 },
+      { cells:37, weight:0.14 }
+    ];
+    const grids = OCTAVES.map(o => makeGrid(o.cells));
+
+    // one fixed noise field, reused for every frame — holes only ever
+    // grow as the threshold is lowered, never flicker or relocate
+    field = new Float32Array(TILE_RES*TILE_RES);
+    let fieldMin = Infinity, fieldMax = -Infinity;
+    for(let y=0;y<TILE_RES;y++){
+      for(let x=0;x<TILE_RES;x++){
+        const u = x/TILE_RES, v = y/TILE_RES;
+        let n = 0;
+        for(let o=0;o<OCTAVES.length;o++){
+          n += sampleGrid(grids[o], OCTAVES[o].cells, u, v) * OCTAVES[o].weight;
+        }
+        field[y*TILE_RES+x] = n;
+        if(n < fieldMin) fieldMin = n;
+        if(n > fieldMax) fieldMax = n;
+      }
+    }
+    // stable per-pixel dither so the transition band looks like grain,
+    // not a smooth grey gradient — this is the "particle" texture at
+    // the corroding edge, baked in rather than animated live
+    dither = new Float32Array(TILE_RES*TILE_RES);
+    for(let i=0;i<dither.length;i++) dither[i] = Math.random();
+    // a second, independent noise for color jitter so the rust bloom reads
+    // as mottled texture rather than a flat smooth gradient
+    colorNoise = new Float32Array(TILE_RES*TILE_RES);
+    for(let i=0;i<colorNoise.length;i++) colorNoise[i] = Math.random();
+
+    // calibrate the sweep against this exact field's actual range (rather
+    // than a hardcoded number) so it stays an even 0%→100% progression no
+    // matter how the octaves above get tuned later
+    const pad = (fieldMax - fieldMin) * 0.04;
+    sweepHigh = fieldMax + pad; sweepLow = fieldMin - pad;
+
+    const urls = [];
+    const states = []; // per-frame classification (0 open / 1 band / 2 solid),
+                        // kept alongside the images so the dust system below
+                        // can find "where the active rust edge currently is"
+                        // without re-reading pixels back out of a PNG
+    for(let fIdx=0; fIdx<FRAMES; fIdx++){
+      const t = fIdx/(FRAMES-1);
+      // the very last frame is forced fully open, no matter what the
+      // threshold math works out to — scrolling all the way down must
+      // always end on a completely clean, unobstructed image network,
+      // never a few stray leftover white/rust specks sitting on top of it
+      const forceFullyOpen = (fIdx === FRAMES-1);
+      const { url, state } = renderCorrosionFrame(thresholdAt(t), forceFullyOpen);
+      urls.push(url);
+      states.push(state);
+    }
+    return { urls, states };
+  }
+
+  // ---- dust: a small burst of fading debris puffs off the active rust
+  // band each time the scroll crosses into a new frame. Spawning only
+  // happens on that same quantized frame-change event (not every scroll
+  // pixel), and the animation loop only runs for the ~1s a burst is alive,
+  // then stops itself — so this stays just as cheap as everything above.
+  const dustCanvas = document.getElementById('dust-canvas');
+  const dustCtx = dustCanvas.getContext('2d');
+  let dustParticles = [];
+  let dustAnimating = false;
+  let dustDPR = Math.min(2, window.devicePixelRatio || 1);
+
+  function sizeDustCanvas(){
+    dustDPR = Math.min(2, window.devicePixelRatio || 1);
+    dustCanvas.width = window.innerWidth * dustDPR;
+    dustCanvas.height = window.innerHeight * dustDPR;
+    dustCtx.setTransform(dustDPR, 0, 0, dustDPR, 0, 0);
+  }
+  sizeDustCanvas();
+
+  function spawnDustParticle(x, y){
+    dustParticles.push({
+      x, y,
+      vx: (Math.random()*2-1) * 34,
+      vy: -(22 + Math.random()*68),
+      size: 1 + Math.random()*2.1,
+      born: performance.now(),
+      life: 550 + Math.random()*450
+    });
+    if(!dustAnimating){ dustAnimating = true; requestAnimationFrame(dustLoop); }
+  }
+
+  function dustLoop(now){
+    dustCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    dustParticles = dustParticles.filter(p => (now - p.born) < p.life);
+    dustParticles.forEach(p=>{
+      const t = (now - p.born) / p.life;
+      const alpha = (1 - t) * 0.8;
+      const x = p.x + p.vx * t;
+      const y = p.y + p.vy * t;
+      dustCtx.globalAlpha = alpha;
+      dustCtx.fillStyle = '#9c3b22';
+      dustCtx.fillRect(x, y, p.size, p.size);
+    });
+    dustCtx.globalAlpha = 1;
+    if(dustParticles.length > 0){
+      requestAnimationFrame(dustLoop);
+    } else {
+      dustAnimating = false;
+    }
+  }
+
+  function spawnDustFromFrame(idx){
+    const state = frameStates && frameStates[idx];
+    if(!state) return;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const scrollY = window.scrollY;
+    const phaseY = -(((scrollY % TILE_PX) + TILE_PX) % TILE_PX);
+    const cols = Math.ceil(vw / TILE_PX) + 1;
+    const rows = Math.ceil((vh - phaseY) / TILE_PX) + 1;
+    const SPAWN_PER_TILE = 5;
+
+    for(let row = 0; row < rows; row++){
+      for(let col = -1; col < cols; col++){
+        for(let s=0; s<SPAWN_PER_TILE; s++){
+          let tries = 0;
+          while(tries < 5){
+            tries++;
+            const tx = (Math.random()*TILE_RES) | 0;
+            const ty = (Math.random()*TILE_RES) | 0;
+            if(state[ty*TILE_RES + tx] === 1){
+              const screenX = col*TILE_PX + (tx/TILE_RES)*TILE_PX;
+              const screenY = phaseY + row*TILE_PX + (ty/TILE_RES)*TILE_PX;
+              if(screenX > -20 && screenX < vw+20 && screenY > -20 && screenY < vh+20){
+                spawnDustParticle(screenX, screenY);
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  let frameUrls = null;
+  let frameStates = null;
+  let currentFrame = -1;
+  let ticking = false;
+
+  // ---- idle crawl: a small amount of extra corrosion that creeps in on
+  // its own while you sit still reading, on top of the normal scroll-
+  // driven amount above. Scrolling itself still works exactly as before
+  // (fast, direct); this only ever ADDS a small, slow bonus while nothing
+  // is happening, and that bonus is capped well under one frame's worth
+  // of progress (each of the 22 frames is ~4.5% of the full sweep), so
+  // the most it can ever do on its own is nudge the edge forward by about
+  // a single step — meant to be noticed only if you're staring at it, not
+  // a visible animation. Any scroll event resets the idle clock back to
+  // zero, so the crawl only ever measures time spent NOT scrolling.
+  // must clear a full frame's width (1/FRAMES ≈ 0.045) with room to spare,
+  // or sitting still right at a frame's own start would never visibly
+  // advance at all — the cap is what guarantees at least one small step
+  // eventually happens no matter where you're resting
+  const IDLE_CAP = 1.3 / FRAMES;    // max extra progress idling alone can add (~1.3 frames)
+  const IDLE_SECONDS_TO_CAP = 80;   // how long it takes to fully reach that cap (~1.3 min)
+  let idleAnchorT = performance.now(); // timestamp of the most recent "stopped scrolling" moment
+  let lastContinuousProgress = null; // last progress value rendered through the continuous path below
+
+  // the SAME frame image does two jobs at once: as an alpha-only mask on
+  // #page-wrap it cuts matching holes through both the white surface AND
+  // the text in perfect sync; as corrosion-bg's own background-image its
+  // RGB (invisible to the mask) is what actually paints the rust color
+  // into the transition band.
+  function applyFrameUrl(url){
+    const cssUrl = `url(${url})`;
+    pageWrap.style.maskImage = cssUrl;
+    pageWrap.style.webkitMaskImage = cssUrl;
+    corrosionBg.style.backgroundImage = cssUrl;
+    corrosionBg.style.maskImage = cssUrl;
+    corrosionBg.style.webkitMaskImage = cssUrl;
+  }
+
+  // ---------- cursor-following corrosion glow (decorative only) ----------
+  // a soft rust-red smudge that trails the cursor and fades a moment after
+  // it stops — purely a surface stain. This is NOT a second mask/reveal
+  // layer (an earlier version was, and that's explicitly not what was
+  // wanted): it never touches page-wrap's or corrosion-bg's mask, so the
+  // paper never actually opens up under the cursor — it just looks like a
+  // touch of corrosion passing through, drawn as real pixels on its own
+  // canvas layered between the white paper and the text (same technique as
+  // the dust-canvas burst above: a plain clear-and-redraw rAF loop that
+  // stops itself once nothing is left to fade).
+  const glowCanvas = document.getElementById('trail-glow-canvas');
+  const glowCtx = glowCanvas.getContext('2d');
+  let glowDPR = Math.min(2, window.devicePixelRatio || 1);
+  let glowBlobs = []; // { x, y, born }
+  let glowAnimating = false;
+
+  function sizeGlowCanvas(){
+    glowDPR = Math.min(2, window.devicePixelRatio || 1);
+    glowCanvas.width = window.innerWidth * glowDPR;
+    glowCanvas.height = window.innerHeight * glowDPR;
+    glowCtx.setTransform(glowDPR, 0, 0, glowDPR, 0, 0);
+  }
+  sizeGlowCanvas();
+  window.addEventListener('resize', sizeGlowCanvas);
+
+  const GLOW_RADIUS = 80;               // px in viewport space, at the moment a blob is stamped (toned down from 110)
+  const GLOW_LIFE = 1400;               // ms a single stamped blob takes to fully fade
+  const GLOW_COLOR = 'rgba(167,58,30,'; // a rust-red pulled from the same palette as the scroll corrosion's mid-band
+  const GLOW_SPAWN_GAP = 40;            // ms between stamps while moving — dense enough to read as a continuous trail, cheap enough to run forever
+
+  function spawnGlow(x, y){
+    glowBlobs.push({ x, y, born: performance.now() });
+    if(glowBlobs.length > 60) glowBlobs.shift(); // a very fast swipe shouldn't pile up indefinitely
+    if(!glowAnimating){ glowAnimating = true; requestAnimationFrame(glowLoop); }
+  }
+
+  function glowLoop(now){
+    glowCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    glowBlobs = glowBlobs.filter(b => (now - b.born) < GLOW_LIFE);
+    glowBlobs.forEach((b) => {
+      const t = (now - b.born) / GLOW_LIFE;
+      const alpha = Math.pow(1 - t, 1.6) * 0.35; // soft to start, fades out faster near the end (toned down from 0.55)
+      const r = GLOW_RADIUS * (0.7 + t * 0.5);   // gently spreads as it fades, like a stain soaking outward
+      const grad = glowCtx.createRadialGradient(b.x, b.y, 0, b.x, b.y, r);
+      grad.addColorStop(0, GLOW_COLOR + alpha + ')');
+      grad.addColorStop(1, GLOW_COLOR + '0)');
+      glowCtx.fillStyle = grad;
+      glowCtx.beginPath();
+      glowCtx.arc(b.x, b.y, r, 0, Math.PI * 2);
+      glowCtx.fill();
+    });
+    if(glowBlobs.length > 0){
+      requestAnimationFrame(glowLoop);
+    } else {
+      glowAnimating = false;
+    }
+  }
+
+  let lastGlowSpawn = 0;
+  window.addEventListener('pointermove', (e) => {
+    const now = performance.now();
+    if(now - lastGlowSpawn < GLOW_SPAWN_GAP) return;
+    lastGlowSpawn = now;
+    spawnGlow(e.clientX, e.clientY);
+  }, { passive:true });
+
+  // scroll-driven path: swaps between the 22 cheap precomputed frames —
+  // unchanged from before, still a couple of comparisons per scroll event,
+  // no pixel work.
+  function applyDiscreteFrame(idx){
+    lastContinuousProgress = null; // next idle tick must render fresh, not assume it's still mid-crawl
+    if(idx === currentFrame) return;
+    currentFrame = idx;
+    applyFrameUrl(frameUrls[idx]);
+    spawnDustFromFrame(idx);
+  }
+
+  // idle-crawl path: instead of snapping straight to the next of the 22
+  // precomputed frames (which reads as one abrupt jump), render a fresh
+  // one-off frame at the EXACT in-between threshold for the current
+  // progress, using the same noise field/dither/coloring as the
+  // precomputed set so it lines up seamlessly with them. Called on a
+  // slow periodic tick (not every scroll frame), so the per-pixel cost
+  // stays cheap — same ballpark as building one of the 22 frames, which
+  // already happens 22-at-once without jank.
+  function applyContinuousFrame(progress){
+    // skip imperceptible re-renders (e.g. once the idle bonus has capped
+    // out and stopped changing) rather than redrawing an identical canvas
+    if(lastContinuousProgress !== null && Math.abs(progress - lastContinuousProgress) < 0.0003) return;
+    lastContinuousProgress = progress;
+    currentFrame = -1; // no longer sitting on one of the discrete frames — next scroll must re-snap
+    // same t->threshold mapping the 22 precomputed frames use (t = idx/(FRAMES-1)),
+    // just driven continuously by progress instead of a snapped integer idx,
+    // so a continuous frame and its neighboring discrete frames render
+    // identically at matching positions with no visible seam
+    const t = Math.min(1, progress * FRAMES / (FRAMES - 1));
+    const { url } = renderCorrosionFrame(thresholdAt(t), t >= 1);
+    applyFrameUrl(url);
+    // no dust here on purpose — dust puffs are the signature of the fast,
+    // active scroll-driven edge; a quiet background creep should stay quiet
+  }
+
+  function update(){
+    ticking = false;
+    const doc = document.documentElement;
+    // same hero-height offset as the sphere's own scrollProgress() — the
+    // corrosion reveal shouldn't start creeping in until you're actually
+    // past the hero screen
+    const heroH = window.innerHeight;
+    const scrollable = Math.max(1, doc.scrollHeight - window.innerHeight - heroH);
+    const base = Math.min(1, Math.max(0, (window.scrollY - heroH) / scrollable));
+    const idleElapsed = (performance.now() - idleAnchorT) / 1000;
+    const idleBonus = Math.min(IDLE_CAP, IDLE_CAP * (idleElapsed / IDLE_SECONDS_TO_CAP));
+    const progress = Math.min(1, base + idleBonus);
+
+    if(!frameUrls) return;
+
+    if(idleBonus > 0){
+      applyContinuousFrame(progress);
+    } else {
+      const idx = Math.min(FRAMES-1, Math.floor(progress * FRAMES));
+      applyDiscreteFrame(idx);
+    }
+  }
+  function requestUpdate(){
+    if(!ticking){ ticking = true; requestAnimationFrame(update); }
+  }
+
+  // one single mask layer, tiling across the whole document and scrolling
+  // with it normally — the same frame image on both page-wrap (cuts the
+  // holes) and corrosion-bg (paints the rust color into them).
+  pageWrap.style.maskRepeat = 'repeat';
+  pageWrap.style.maskSize = TILE_PX + 'px ' + TILE_PX + 'px';
+  pageWrap.style.webkitMaskRepeat = 'repeat';
+  pageWrap.style.webkitMaskSize = TILE_PX + 'px ' + TILE_PX + 'px';
+  corrosionBg.style.backgroundSize = TILE_PX + 'px ' + TILE_PX + 'px';
+  corrosionBg.style.backgroundRepeat = 'repeat';
+  corrosionBg.style.maskRepeat = 'repeat';
+  corrosionBg.style.webkitMaskRepeat = 'repeat';
+  corrosionBg.style.maskSize = TILE_PX + 'px ' + TILE_PX + 'px';
+  corrosionBg.style.webkitMaskSize = TILE_PX + 'px ' + TILE_PX + 'px';
+
+  // build tiles slightly after first paint so the initial (plain white,
+  // scroll=0) view isn't delayed by this one-time setup cost. before the
+  // first frame is ready, #page-wrap has no mask-image and corrosion-bg has
+  // no background-image yet, so its background-color (solid white) is what
+  // shows — exactly the correct "untouched" look at the top of the page.
+  // the Three.js render loop now keeps the main thread continuously busy
+  // (one WebGL frame after another), so genuine idle gaps can become rare —
+  // a bare requestIdleCallback could end up waiting a long time. The
+  // timeout option forces it to fire anyway once that long has passed,
+  // same spirit as before (build this off the critical first-paint path)
+  // but with a guaranteed upper bound.
+  const schedule = window.requestIdleCallback
+    ? (fn => window.requestIdleCallback(fn, { timeout: 1200 }))
+    : (fn => setTimeout(fn, 0));
+  schedule(()=>{
+    const built = buildTiles();
+    frameUrls = built.urls;
+    frameStates = built.states;
+    // once the real frames take over, drop the solid background-color —
+    // otherwise it paints straight back over every hole the frame's own
+    // alpha just opened, since both would sit on the same element.
+    corrosionBg.style.backgroundColor = 'transparent';
+    update();
+  });
+
+  window.addEventListener('scroll', ()=>{
+    idleAnchorT = performance.now(); // actively scrolling — restart the idle clock
+    requestUpdate();
+  }, { passive:true });
+  window.addEventListener('resize', ()=>{
+    requestUpdate();
+    sizeDustCanvas();
+  });
+
+  // nothing else drives update() while you're NOT scrolling, so a periodic
+  // tick is what lets the idle crawl above actually render. Frequent
+  // enough (every ~500ms) that the continuous in-between frames it
+  // produces read as a slow, steady creep rather than discrete jumps;
+  // each tick is cheap once the idle bonus caps out and stops changing
+  // (applyContinuousFrame then skips the redraw entirely).
+  setInterval(requestUpdate, 500);
+})();
+
+// ---- background music ----
+// browsers block audio with sound from starting on page load without a
+// user gesture, so playback is kicked off on the very first interaction
+// of any kind (click, scroll, key, touch) rather than tied to any one
+// control — the toggle button is there purely so the person can turn it
+// back off (or on again) afterward, and reflects the real <audio> state
+// rather than driving it blindly.
+(function(){
+  const bgm = document.getElementById('bgm');
+  const toggle = document.getElementById('bgm-toggle');
+  if(!bgm || !toggle) return;
+  bgm.volume = 0.35;
+
+  let userWantsMuted = false;
+
+  function syncToggleLabel(){
+    toggle.textContent = (bgm.paused || userWantsMuted) ? '♪' : '♫';
+    toggle.style.opacity = (bgm.paused || userWantsMuted) ? '0.55' : '0.85';
+  }
+
+  function tryStart(){
+    if(userWantsMuted || !bgm.paused) return;
+    bgm.play().catch(() => {}); // a stray autoplay rejection here is harmless — the next gesture tries again
+    syncToggleLabel();
+  }
+
+  ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach((evt) => {
+    window.addEventListener(evt, tryStart, { passive:true, once:true });
+  });
+
+  toggle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if(bgm.paused){
+      userWantsMuted = false;
+      bgm.play().catch(() => {});
+    } else {
+      userWantsMuted = true;
+      bgm.pause();
+    }
+    syncToggleLabel();
+  });
+
+  syncToggleLabel();
+})();
+</script>
+</body>
+</html>
