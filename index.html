@@ -907,6 +907,16 @@ root.appendChild(Object.assign(document.createElement('div'), { className:'end-s
     const cy = h * (0.18 + Math.random() * 0.64);
     const angle = (Math.random() * 2 - 1) * 0.35;
 
+    // reuse the SAME adaptive choice the corrosion overlay already makes
+    // for this exact photo (computed once from its own measured
+    // brightness — see computeAvgLuminance/overlayParams.blendMode): on a
+    // light/paper-ish photo 'multiply' has headroom to darken it, on a
+    // dark photo 'screen' has headroom to brighten it. A flat source-over
+    // alpha ignores the destination's own tones entirely; this way the
+    // fragment visibly blends with what's underneath instead of sitting
+    // on top of it like a sticker.
+    const imgBlendMode = (targetMesh.userData.overlayParams && targetMesh.userData.overlayParams.blendMode) || 'screen';
+
     // build the stamp once, with a soft radial-gradient edge baked in —
     // feathered this way it reads as a faded photographic fragment, not
     // a hard-edged sticker pasted on top
@@ -928,7 +938,7 @@ root.appendChild(Object.assign(document.createElement('div'), { className:'end-s
     // bakedCanvas — can replay it: see drawStampsOnto, used by
     // redrawFocusCanvas so it still shows up once you click in to zoom
     if(!targetMesh.userData.stamps) targetMesh.userData.stamps = [];
-    targetMesh.userData.stamps.push({ stampCanvas, cx, cy, angle, sw, sh });
+    targetMesh.userData.stamps.push({ stampCanvas, cx, cy, angle, sw, sh, imgBlendMode });
     if(targetMesh.userData.stamps.length > STAMP_MAX_PER_PHOTO) targetMesh.userData.stamps.shift();
 
     // snapshot the photo exactly as it looks right now, so the fade-in
@@ -956,8 +966,9 @@ root.appendChild(Object.assign(document.createElement('div'), { className:'end-s
 
       // the actual image content, now genuinely visible — this is the
       // part that makes it read as "a piece of that photo is here now",
-      // not just a tint someone has to squint at
-      ctx.globalCompositeOperation = 'source-over';
+      // not just a tint someone has to squint at. screen/multiply (not a
+      // flat source-over alpha) so it actually reacts to what's underneath.
+      ctx.globalCompositeOperation = imgBlendMode;
       ctx.globalAlpha = STAMP_ALPHA_IMG * t;
       ctx.drawImage(stampCanvas, -sw / 2, -sh / 2, sw, sh);
 
@@ -993,7 +1004,7 @@ root.appendChild(Object.assign(document.createElement('div'), { className:'end-s
       ctx.save();
       ctx.translate(s.cx, s.cy);
       ctx.rotate(s.angle);
-      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalCompositeOperation = s.imgBlendMode || 'screen';
       ctx.globalAlpha = STAMP_ALPHA_IMG;
       ctx.drawImage(s.stampCanvas, -s.sw / 2, -s.sh / 2, s.sw, s.sh);
       ctx.globalCompositeOperation = 'color';
