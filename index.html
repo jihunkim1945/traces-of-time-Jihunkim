@@ -883,19 +883,53 @@ root.appendChild(Object.assign(document.createElement('div'), { className:'end-s
   // canvas backing that mesh's live texture, so it shows up immediately
   // and persists (survives that mesh's own later click-to-focus opens,
   // since those read from this same baked texture as their starting map)
+  // shared by the live fade-in below AND drawStampsOnto's full-strength
+  // replay, so the two never silently drift apart
+  const STAMP_ALPHA_IMG = 0.6;
+  const STAMP_ALPHA_COLOR = 0.9;
+  const STAMP_ALPHA_MULTIPLY = 0.3;
+  const STAMP_MAX_PER_PHOTO = 3; // caps memory/redraw cost if the same photo keeps getting landed on over a long session
+
   function stampImageOnto(targetMesh, sourceImg){
     const canvas = targetMesh.userData.bakedCanvas;
     const ctx = targetMesh.userData.bakedCtx;
     const tex = targetMesh.userData.bakedTex;
     if(!canvas || !ctx || !tex || !sourceImg) return;
     const w = canvas.width, h = canvas.height;
-    const stampFrac = 0.22 + Math.random() * 0.14;
+    // bigger and more deliberate than the original faint tint — this is
+    // meant to actually read as a fragment of the other photo having
+    // landed here, not just a hue shift someone has to go hunting for
+    const stampFrac = 0.34 + Math.random() * 0.18;
     const sw = w * stampFrac;
     const sAspect = (sourceImg.naturalWidth || sourceImg.width) / (sourceImg.naturalHeight || sourceImg.height || 1);
     const sh = sw / sAspect;
     const cx = w * (0.18 + Math.random() * 0.64);
     const cy = h * (0.18 + Math.random() * 0.64);
     const angle = (Math.random() * 2 - 1) * 0.35;
+
+    // build the stamp once, with a soft radial-gradient edge baked in —
+    // feathered this way it reads as a faded photographic fragment, not
+    // a hard-edged sticker pasted on top
+    const stampCanvas = document.createElement('canvas');
+    stampCanvas.width = sw; stampCanvas.height = sh;
+    const sctx = stampCanvas.getContext('2d');
+    sctx.drawImage(sourceImg, 0, 0, sw, sh);
+    sctx.globalCompositeOperation = 'destination-in';
+    const edgeGrad = sctx.createRadialGradient(sw/2, sh/2, 0, sw/2, sh/2, Math.max(sw, sh) * 0.62);
+    edgeGrad.addColorStop(0, 'rgba(255,255,255,1)');
+    edgeGrad.addColorStop(0.65, 'rgba(255,255,255,0.9)');
+    edgeGrad.addColorStop(1, 'rgba(255,255,255,0)');
+    sctx.fillStyle = edgeGrad;
+    sctx.fillRect(0, 0, sw, sh);
+    sctx.globalCompositeOperation = 'source-over';
+
+    // remembered on the mesh itself (capped, oldest dropped first) so
+    // ANY later redraw of this photo — not just the sphere view's own
+    // bakedCanvas — can replay it: see drawStampsOnto, used by
+    // redrawFocusCanvas so it still shows up once you click in to zoom
+    if(!targetMesh.userData.stamps) targetMesh.userData.stamps = [];
+    targetMesh.userData.stamps.push({ stampCanvas, cx, cy, angle, sw, sh });
+    if(targetMesh.userData.stamps.length > STAMP_MAX_PER_PHOTO) targetMesh.userData.stamps.shift();
 
     // snapshot the photo exactly as it looks right now, so the fade-in
     // below can redraw [base + stamp-at-current-alpha] fresh every frame
@@ -919,12 +953,24 @@ root.appendChild(Object.assign(document.createElement('div'), { className:'end-s
       ctx.save();
       ctx.translate(cx, cy);
       ctx.rotate(angle);
+
+      // the actual image content, now genuinely visible — this is the
+      // part that makes it read as "a piece of that photo is here now",
+      // not just a tint someone has to squint at
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = STAMP_ALPHA_IMG * t;
+      ctx.drawImage(stampCanvas, -sw / 2, -sh / 2, sw, sh);
+
+      // color + multiply on top, tying the fragment's own coloring into
+      // the target photo so it still reads as a trace that belongs there,
+      // not a sticker pasted over it
       ctx.globalCompositeOperation = 'color';
-      ctx.globalAlpha = 0.85 * t;
-      ctx.drawImage(sourceImg, -sw / 2, -sh / 2, sw, sh);
+      ctx.globalAlpha = STAMP_ALPHA_COLOR * t;
+      ctx.drawImage(stampCanvas, -sw / 2, -sh / 2, sw, sh);
       ctx.globalCompositeOperation = 'multiply';
-      ctx.globalAlpha = 0.22 * t;
-      ctx.drawImage(sourceImg, -sw / 2, -sh / 2, sw, sh);
+      ctx.globalAlpha = STAMP_ALPHA_MULTIPLY * t;
+      ctx.drawImage(stampCanvas, -sw / 2, -sh / 2, sw, sh);
+
       ctx.restore();
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = 1;
@@ -932,6 +978,34 @@ root.appendChild(Object.assign(document.createElement('div'), { className:'end-s
 
       if(t < 1) requestAnimationFrame(animStamp);
     })();
+  }
+
+  // replays every stamp a photo has ever received, at full strength (no
+  // fade — the fade is only for the live moment one first lands), onto
+  // whichever canvas is asking: bakedCanvas's own redraw already carries
+  // stamps forward by snapshotting its current pixels as `base` above, but
+  // redrawFocusCanvas rebuilds fresh from the ORIGINAL photo every time
+  // (it has to, to animate charge progress), so it needs this to not
+  // silently lose them the moment you click in to zoom
+  function drawStampsOnto(ctx, stamps){
+    if(!stamps || !stamps.length) return;
+    stamps.forEach((s) => {
+      ctx.save();
+      ctx.translate(s.cx, s.cy);
+      ctx.rotate(s.angle);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = STAMP_ALPHA_IMG;
+      ctx.drawImage(s.stampCanvas, -s.sw / 2, -s.sh / 2, s.sw, s.sh);
+      ctx.globalCompositeOperation = 'color';
+      ctx.globalAlpha = STAMP_ALPHA_COLOR;
+      ctx.drawImage(s.stampCanvas, -s.sw / 2, -s.sh / 2, s.sw, s.sh);
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.globalAlpha = STAMP_ALPHA_MULTIPLY;
+      ctx.drawImage(s.stampCanvas, -s.sw / 2, -s.sh / 2, s.sw, s.sh);
+      ctx.restore();
+    });
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
   }
 
   // picks a landing spot for the stamp/travel-sparks among the 4 photos
@@ -1539,9 +1613,17 @@ root.appendChild(Object.assign(document.createElement('div'), { className:'end-s
     mesh.userData.focusTex = tex;
   }
   function redrawFocusCanvas(mesh, progress){
-    const { focusCtx: ctx, focusCanvas: fc, focusTex: tex, photoImg, overlayImg, overlayParams } = mesh.userData;
+    const { focusCtx: ctx, focusCanvas: fc, focusTex: tex, photoImg, overlayImg, overlayParams, stamps } = mesh.userData;
     if(!ctx) return;
     drawPhotoFrame(ctx, fc.width, fc.height, photoImg, overlayImg, overlayParams, progress);
+    // redrawFocusCanvas always starts fresh from the ORIGINAL photo (it
+    // has to, to animate the charge progress correctly) — so without this,
+    // opening/zooming into a photo that received a stamp would silently
+    // wipe it off for as long as that view is open, then it would only
+    // reappear once focus closes and the mesh goes back to showing
+    // bakedTex. Replaying any recorded stamps on top here keeps it
+    // visible continuously, in every view, not just the sphere view.
+    drawStampsOnto(ctx, stamps);
     tex.needsUpdate = true;
   }
   function disposeFocusCanvas(mesh){
